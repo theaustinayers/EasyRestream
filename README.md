@@ -248,20 +248,39 @@ and end-to-end latency still require platform/OBS monitoring.
 
 ### Updating an existing installation
 
-To apply source/dashboard changes without replacing saved keys or configuration:
+Use this to pick up new features and fixes. Your dashboard account, ingest key,
+and saved destinations are kept. **Updating stops every outgoing stream**, so do
+it while you are not live.
 
-```bash
-cd EasyRestream
-git pull --ff-only
-sudo systemctl stop rtmp-relay
-sudo install -m 644 relay.py /opt/rtmp-relay/relay.py
-sudo install -m 644 web/index.html web/app.js web/style.css /opt/rtmp-relay/web/
-sudo systemctl start rtmp-relay
-```
+1. On the Ubuntu server, from the folder where you cloned the repository
+   (usually your home folder), run:
 
-Refresh the browser and manually restart the desired destinations. The installer
-is for fresh Ubuntu 26.04 systems, not OS upgrades; do not rerun it over an
-existing installation.
+   ```bash
+   cd ~/EasyRestream
+   git pull --ff-only
+   sudo systemctl stop rtmp-relay
+   sudo install -m 644 relay.py /opt/rtmp-relay/relay.py
+   sudo install -m 644 web/index.html web/app.js web/style.css /opt/rtmp-relay/web/
+   sudo systemctl start rtmp-relay
+   systemctl is-active rtmp-relay-media rtmp-relay
+   ```
+
+   The last command should print `active` twice. If it does not, check
+   `sudo journalctl -u rtmp-relay -n 50 --no-pager`.
+
+2. In the browser, hard-refresh the dashboard (**Ctrl+F5**, or **Cmd+Shift+R**
+   on macOS) so the new page and script load instead of cached copies.
+
+3. Press **Start** on each destination you want live again. Destinations always
+   come back stopped after a restart.
+
+Configs from older versions, which saved one URL per platform, are converted
+automatically on the first start. Each old URL becomes a destination with a
+separate server URL and stream key.
+
+The installer is for fresh Ubuntu 26.04 systems, not OS upgrades; do not rerun
+it over an existing installation. To start over instead, use the clean reinstall
+below.
 
 ### Uninstall and clean reinstall
 
