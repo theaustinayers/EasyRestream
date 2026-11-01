@@ -190,7 +190,7 @@ def main():
                     terminate(source)
                     wait_for(lambda: controller.status()["inbound"]["state"] == "waiting",
                              "OBS stopped before key rotation")
-                    new_key = "integration-new-key-123456789"
+                    new_key = "z"
                     controller.update_ingest("rtmp://127.0.0.1:1935/ingest", new_key,
                                              "integration-password-only")
                     wait_for(lambda: any(item["name"] == "ingest/" + new_key for item in paths()),
@@ -207,7 +207,7 @@ def main():
                     controller.action("youtube", "start")
                     wait_for(lambda: ready("sink/youtube"), "outbound with new ingest key")
                     print("PASS: ingest key hot reload, old-key rejection, new-key monitoring and forwarding")
-                    controller.update_account("operator", "changed-integration-password",
+                    controller.update_account("operator", "testpass",
                                               "integration-password-only")
                     assert ready("sink/youtube"), "Account change interrupted live output"
                     print("PASS: account update preserves live forwarding")

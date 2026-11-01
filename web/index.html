@@ -24,7 +24,8 @@
         <label>Full ingest URL<input id="ingest-url" type="password" readonly autocomplete="off"></label>
         <div class="buttons"><button id="reveal-ingest" type="button">Show key and URL</button></div>
         <p id="ingest-note" class="info"></p>
-        <label>New stream key (leave blank to keep current key)<input id="new-ingest-key" type="password" autocomplete="off" minlength="16" maxlength="128"></label>
+        <label>New stream key (leave blank to keep current key)<input id="new-ingest-key" type="password" autocomplete="off" minlength="1" maxlength="128"></label>
+        <p class="info">Use 1-128 letters, digits, underscores or hyphens. A long random key is recommended; keep it secret.</p>
         <label>Current dashboard password to save ingest settings<input id="ingest-password" type="password" autocomplete="current-password"></label>
         <div class="buttons"><button id="save-ingest" type="button">Save ingest settings</button></div>
         <p id="ingest-message" role="status"></p>
@@ -36,7 +37,7 @@
       <p class="info">One editable dashboard account. Account changes do not stop active streams.</p>
       <label>Username<input id="account-username" type="text" autocomplete="username" maxlength="64"></label>
       <label>Current password<input id="account-current-password" type="password" autocomplete="current-password"></label>
-      <label>New password (leave blank to keep current password)<input id="account-password" type="password" autocomplete="new-password" minlength="16" maxlength="256"></label>
+      <label>New password (leave blank to keep current password)<input id="account-password" type="password" autocomplete="new-password" minlength="8" maxlength="256"></label>
       <label>Confirm new password<input id="account-confirm-password" type="password" autocomplete="new-password"></label>
       <div class="buttons"><button id="save-account" type="button">Save account</button></div>
       <p id="account-message" role="status"></p>

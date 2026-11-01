@@ -77,6 +77,10 @@ document.getElementById("save-account").onclick = async () => {
   const username = document.getElementById("account-username").value.trim();
   const current = document.getElementById("account-current-password").value;
   const password = document.getElementById("account-password").value;
+  if (password && (password.length < 8 || password.length > 256)) {
+    message.textContent = "Password must be 8-256 characters.";
+    return;
+  }
   if (password !== document.getElementById("account-confirm-password").value) {
     message.textContent = "New passwords do not match.";
     return;
@@ -103,13 +107,27 @@ document.getElementById("save-ingest").onclick = async () => {
   if (settingsSaving) return;
   const button = document.getElementById("save-ingest");
   const message = document.getElementById("ingest-message");
+  const key = document.getElementById("new-ingest-key").value;
+  const currentPassword = document.getElementById("ingest-password").value;
+  if (key && !/^[A-Za-z0-9_-]{1,128}$/.test(key)) {
+    message.textContent = "Stream key must be 1-128 letters, digits, underscores or hyphens.";
+    errorBox.textContent = message.textContent;
+    return;
+  }
+  if (!currentPassword) {
+    message.textContent = "Enter your current dashboard password to save ingest settings.";
+    errorBox.textContent = message.textContent;
+    return;
+  }
   settingsSaving = true;
   button.disabled = true;
+  message.textContent = "Saving ingest settings...";
+  errorBox.textContent = "";
   try {
     await request("/api/ingest", {
       server: document.getElementById("ingest-server").value.trim(),
-      stream_key: document.getElementById("new-ingest-key").value,
-      current_password: document.getElementById("ingest-password").value
+      stream_key: key,
+      current_password: currentPassword
     });
     document.getElementById("new-ingest-key").value = "";
     document.getElementById("ingest-password").value = "";
@@ -117,6 +135,7 @@ document.getElementById("save-ingest").onclick = async () => {
     message.textContent = "Ingest settings saved. Use the displayed server URL and key in OBS.";
   } catch (error) {
     message.textContent = error.message;
+    errorBox.textContent = error.message;
   } finally {
     settingsSaving = false;
     button.disabled = false;

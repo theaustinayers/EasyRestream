@@ -172,11 +172,34 @@ class RelayTests(unittest.TestCase):
         self.controller.update_ingest("rtmp://other.example.org:1935/ingest", "", self.password)
         self.assertEqual(self.controller.ingest_settings()["stream_key"], new_key)
 
+    def test_eight_character_custom_ingest_key(self):
+        path = self.media_config()
+        self.controller.update_ingest("rtmp://stream.example.org:1935/ingest",
+                                      "demo_key", self.password)
+        self.assertEqual(self.controller.ingest_settings()["stream_key"], "demo_key")
+        self.assertEqual(path.read_text().count("ingest/demo_key"), 3)
+
+    def test_minimum_password_and_stream_key(self):
+        path = self.media_config()
+        self.controller.update_account("operator", "testpass", self.password)
+        header = self.auth("operator", "testpass")
+        self.assertTrue(self.controller.authenticate(header))
+        self.controller.update_ingest("rtmp://stream.example.org:1935/ingest", "z", "testpass")
+        self.assertEqual(self.controller.ingest_settings()["stream_key"], "z")
+        self.assertEqual(path.read_text().count("ingest/z"), 3)
+        restarted = relay.Controller(self.path)
+        self.assertTrue(restarted.authenticate(header))
+        self.assertEqual(restarted.ingest_settings()["stream_key"], "z")
+        restarted.close()
+        for password in ("", "1234567", "x" * 257):
+            with self.assertRaises(ValueError):
+                relay.hash_password(password)
+
     def test_ingest_invalid_input_and_active_source_rejected(self):
         self.media_config()
         for server, key in (("rtmp://YOUR_SERVER_IP:1935/ingest", ""),
                             ("rtmps://host:1935/ingest", ""), ("rtmp://host:9999/ingest", ""),
-                            ("rtmp://host:1935/wrong", ""), ("rtmp://host:1935/ingest", "short"),
+                            ("rtmp://host:1935/wrong", ""), ("rtmp://host:1935/ingest", "x" * 129),
                             ("rtmp://host:1935/ingest", "../invalid-key-1234")):
             with self.assertRaises(ValueError):
                 self.controller.update_ingest(server, key, self.password)

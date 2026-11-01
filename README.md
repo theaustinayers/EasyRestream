@@ -133,7 +133,7 @@ There is one dashboard account, initially `admin` with the install-generated
 password. Open **Dashboard account** to change its username, password, or both.
 Confirm your current password; leave the new-password fields blank to change
 only the username. Usernames allow 1-64 letters, digits, dots, underscores and
-hyphens. Passwords require 16-256 characters and matching confirmation.
+hyphens. Passwords require 8-256 characters and matching confirmation.
 The backend stores a salted PBKDF2-SHA256 hash, not your dashboard password.
 Existing plaintext dashboard configurations migrate automatically on startup.
 Old credentials stop working immediately after a successful change. The open
@@ -147,7 +147,7 @@ displayed address does not configure DNS, ports, TLS or firewall rules.
 Use the fixed `rtmp://HOST:1935/ingest` format.
 
 To choose a new ingest key, **stop OBS and all outputs**, then enter a new
-16-128-character key (letters, digits, underscores and hyphens) and confirm
+1-128-character key (letters, digits, underscores and hyphens) and confirm
 your current dashboard password. Leave the new-key field blank to keep the key.
 The dashboard updates MediaMTX's exact ingest path and permissions and its
 own source configuration; MediaMTX hot-reloads the file. Reconfigure OBS
@@ -155,6 +155,12 @@ before reconnecting, then manually start the desired destinations.
 Key changes are rejected while outputs are active or the monitor sees live/
 stalled input. Always stop OBS first, including during connection retries.
 Custom-edited MediaMTX path layouts must be updated manually instead.
+One-character custom keys are accepted for compatibility, but a long random
+key is strongly recommended: the ingest key is a credential. Restrict ingest
+to your OBS source IP or VPN, particularly when using a short memorable key.
+Enter changes in **New stream key**, not the read-only **Current stream key**
+field. Saving requires a real OBS server hostname/IP and your current dashboard
+password; the dashboard shows validation errors and a saving message.
 
 The root-only `access.txt` is an **initial installation snapshot**, not a live
 credential record. After account/key changes, its old values are obsolete;

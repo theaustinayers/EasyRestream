@@ -31,8 +31,8 @@ def validate_username(value: str) -> str:
 
 
 def hash_password(password: str) -> str:
-    if not isinstance(password, str) or not 16 <= len(password) <= 256:
-        raise ValueError("Password must be 16-256 characters.")
+    if not isinstance(password, str) or not 8 <= len(password) <= 256:
+        raise ValueError("Password must be 8-256 characters.")
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600000)
     return f"pbkdf2_sha256$600000${salt.hex()}${digest.hex()}"
@@ -379,8 +379,8 @@ class Controller:
             if (parsed.scheme != "rtmp" or parsed.port != 1935 or parsed.query
                     or parsed.path != urlsplit(prefix).path or parsed.hostname == "your_server_ip"):
                 raise ValueError(f"Use rtmp://YOUR_HOST:1935{urlsplit(prefix).path} as the OBS server URL.")
-            if not isinstance(key, str) or (key and not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key)):
-                raise ValueError("Stream key must be 16-128 letters, digits, underscores or hyphens.")
+            if not isinstance(key, str) or (key and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key)):
+                raise ValueError("Stream key must be 1-128 letters, digits, underscores or hyphens.")
             key = key or old_key
             updated = dict(self.config, ingest_server=server, source=f"{prefix}/{key}")
             if key == old_key:
