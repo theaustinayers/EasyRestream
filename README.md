@@ -1,9 +1,9 @@
-# Ubuntu 24.04 lightweight RTMP relay
+# Ubuntu 26.04 lightweight RTMP relay
 
 One OBS input, three independently controlled RTMP(S) outputs, **no GPU,
 transcoding, resizing, placeholder, recording or preview**. MediaMTX v1.21.3
 handles ingest. One FFmpeg stream-copy process per enabled destination handles
-egress. The Python 3.12 dashboard uses only the standard library.
+egress. The dashboard uses Ubuntu's system Python 3 and only the standard library.
 
 ## Compatibility comes first
 
@@ -26,7 +26,7 @@ egress, plus audio/protocol overhead and capacity headroom. OBS still uploads
 only one feed. There is no zero-latency guarantee. CPU/RAM requirements depend
 on bitrate, encryption and hardware; benchmark your actual workload.
 
-## Install on a fresh Ubuntu 24.04 LTS server
+## Install on a fresh Ubuntu 26.04 LTS server
 
 Supports x86_64 and ARM64. Requires sudo, outbound HTTPS access to Ubuntu package
 repositories/GitHub, and free TCP ports 1935, 8554 and 8080. Do not install on a
@@ -48,7 +48,7 @@ sudo bash install.sh
    ```bash
    sudo apt-get update
    sudo apt-get install --no-install-recommends unzip
-   unzip rtmp-relay-ubuntu24.zip
+   unzip rtmp-relay-ubuntu26.zip
    cd rtmp-relay
    sudo bash install.sh
    ```

@@ -3,8 +3,8 @@ set -euo pipefail
 umask 077
 if [[ $EUID -ne 0 ]]; then echo "Run with sudo bash install.sh" >&2; exit 1; fi
 source /etc/os-release
-if [[ $ID != ubuntu || $VERSION_ID != 24.04 ]]; then
-  echo "This installer targets Ubuntu 24.04 LTS only." >&2; exit 1
+if [[ $ID != ubuntu || $VERSION_ID != 26.04 ]]; then
+  echo "This installer targets Ubuntu 26.04 LTS only." >&2; exit 1
 fi
 BASE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -e /etc/rtmp-relay || -e /opt/rtmp-relay || -e /usr/local/bin/rtmp-relay-mediamtx ||
