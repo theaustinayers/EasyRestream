@@ -243,6 +243,84 @@ Refresh the browser and manually restart the desired destinations. The installer
 is for fresh Ubuntu 26.04 systems, not OS upgrades; do not rerun it over an
 existing installation.
 
+### Uninstall and clean reinstall
+
+**This stops every outgoing stream and resets the dashboard account, ingest
+key and saved destination settings.** The commands preserve a private backup
+of the old configuration. They leave shared packages, firewall rules, your
+Git clone and the dedicated service account intact.
+
+#### 1. Uninstall on the Ubuntu server
+
+For an existing installation with both service units installed:
+
+```bash
+sudo bash <<'SH'
+set -e
+
+if [ -d /etc/rtmp-relay ]; then
+  install -d -m 700 /root/easyrestream-backups
+  cp -a /etc/rtmp-relay \
+    "/root/easyrestream-backups/config-$(date +%Y%m%d-%H%M%S)"
+fi
+
+systemctl disable --now rtmp-relay.service rtmp-relay-media.service
+
+rm -f /etc/systemd/system/rtmp-relay.service
+rm -f /etc/systemd/system/rtmp-relay-media.service
+rm -f /usr/local/bin/rtmp-relay-mediamtx
+rm -rf -- /opt/rtmp-relay
+rm -rf -- /etc/rtmp-relay
+
+systemctl daemon-reload
+SH
+```
+
+The removal commands target only EasyRestream's installed components. Do not
+substitute another application's directories. If service shutdown fails, the
+script stops before deleting files; inspect the error rather than bypassing it.
+Treat configuration backups as sensitive because they contain stream keys.
+
+#### 2. Clean install from the existing Git clone
+
+From the directory containing your `EasyRestream` clone:
+
+```bash
+(
+  set -e
+  cd EasyRestream
+  git pull --ff-only
+  sudo bash install.sh
+)
+```
+
+The installer requires **Ubuntu 26.04 LTS**. If Git reports conflicting local
+changes, stop rather than resetting or overwriting them.
+
+#### 3. Sign in and reconfigure OBS
+
+On the server, read the newly generated credentials:
+
+```bash
+sudo cat /etc/rtmp-relay/access.txt
+```
+
+On your workstation, open the SSH tunnel:
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 YOUR_SSH_USER@YOUR_SERVER_IP
+```
+
+Open `http://127.0.0.1:8080`, hard-refresh with `Ctrl+Shift+R`, and sign in with
+the new credentials. Then:
+
+1. Set the **OBS ingest server URL** to your server's reachable hostname/IP.
+2. Update OBS with the **new ingest key** shown on the dashboard.
+3. Re-enter the destination URLs and stream keys.
+4. Start OBS, then click **Start** for each desired destination.
+
+Do not restore the old configuration backup if your intent is a clean reset.
+
 ### Service diagnostics
 
 ```bash
