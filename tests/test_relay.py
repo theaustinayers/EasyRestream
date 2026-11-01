@@ -179,6 +179,16 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(self.controller.ingest_settings()["stream_key"], "demo_key")
         self.assertEqual(path.read_text().count("ingest/demo_key"), 3)
 
+    def test_key_change_with_placeholder_server_url(self):
+        path = self.media_config()
+        self.controller.update_ingest("rtmp://YOUR_SERVER_IP:1935/ingest", "nycalert", self.password)
+        settings = self.controller.ingest_settings()
+        self.assertEqual(settings["stream_key"], "nycalert")
+        self.assertFalse(settings["configured"])
+        self.assertEqual(path.read_text().count("ingest/nycalert"), 3)
+        self.controller.update_ingest("", "blank-server", self.password)
+        self.assertEqual(self.controller.ingest_settings()["stream_key"], "blank-server")
+
     def test_minimum_password_and_stream_key(self):
         path = self.media_config()
         self.controller.update_account("operator", "testpass", self.password)
@@ -197,8 +207,7 @@ class RelayTests(unittest.TestCase):
 
     def test_ingest_invalid_input_and_active_source_rejected(self):
         self.media_config()
-        for server, key in (("rtmp://YOUR_SERVER_IP:1935/ingest", ""),
-                            ("rtmps://host:1935/ingest", ""), ("rtmp://host:9999/ingest", ""),
+        for server, key in (("rtmps://host:1935/ingest", ""), ("rtmp://host:9999/ingest", ""),
                             ("rtmp://host:1935/wrong", ""), ("rtmp://host:1935/ingest", "x" * 129),
                             ("rtmp://host:1935/ingest", "../invalid-key-1234")):
             with self.assertRaises(ValueError):

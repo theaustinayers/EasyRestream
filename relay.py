@@ -373,12 +373,19 @@ class Controller:
         with self.lock:
             if not verify_password(current_password, self.config["dashboard_password_hash"]):
                 raise ValueError("Current password is incorrect.")
-            server = validate_url(server)
-            parsed = urlsplit(server)
             prefix, old_key = self.config["source"].rsplit("/", 1)
-            if (parsed.scheme != "rtmp" or parsed.port != 1935 or parsed.query
-                    or parsed.path != urlsplit(prefix).path or parsed.hostname == "your_server_ip"):
-                raise ValueError(f"Use rtmp://YOUR_HOST:1935{urlsplit(prefix).path} as the OBS server URL.")
+            if not isinstance(server, str):
+                raise ValueError("Enter the OBS server URL.")
+            server = server.strip()
+            # The placeholder only affects the displayed URL; it must not block key changes.
+            if not server or "your_server_ip" in server.lower():
+                server = ""
+            else:
+                server = validate_url(server)
+                parsed = urlsplit(server)
+                if (parsed.scheme != "rtmp" or parsed.port != 1935 or parsed.query
+                        or parsed.path != urlsplit(prefix).path):
+                    raise ValueError(f"Use rtmp://YOUR_HOST:1935{urlsplit(prefix).path} as the OBS server URL.")
             if not isinstance(key, str) or (key and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key)):
                 raise ValueError("Stream key must be 1-128 letters, digits, underscores or hyphens.")
             key = key or old_key

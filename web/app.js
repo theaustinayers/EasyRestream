@@ -60,7 +60,7 @@ async function loadSettings(username) {
   document.getElementById("ingest-url").value = data.url;
   document.getElementById("ingest-note").textContent = data.configured
     ? "Use OBS server URL and stream key in their separate OBS fields."
-    : "Replace YOUR_SERVER_IP with your server's IP/hostname and save. The SSH dashboard address is not the public ingest address.";
+    : "Optional: replace YOUR_SERVER_IP with your server's public IP/hostname so the full URL is correct. The stream key can be changed either way.";
   settingsReady = true;
 }
 
