@@ -49,6 +49,10 @@ import json
 import os
 from pathlib import Path
 import secrets
+import sys
+
+sys.path.insert(0, "/opt/rtmp-relay")
+from relay import hash_password
 
 path = Path("/etc/rtmp-relay")
 key = secrets.token_hex(24)
@@ -86,7 +90,9 @@ paths:
 """
 (path / "mediamtx.yml").write_text(media)
 (path / "config.json").write_text(json.dumps({
-    "dashboard_password": password,
+    "dashboard_username": "admin",
+    "dashboard_password_hash": hash_password(password),
+    "ingest_server": "",
     "source": f"rtsp://127.0.0.1:8554/ingest/{key}",
     "ffmpeg": "/usr/bin/ffmpeg",
     "destinations": {"youtube": "", "facebook": "", "x": ""}

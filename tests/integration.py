@@ -67,9 +67,10 @@ def main():
                                 "      - action: publish\n        path: ~^sink/\n"
                                 "      - action: read")
         config = config.replace("        path: ingest/testkey\npaths:",
-                                "        path: \"\"\npaths:")
+                                "        path: ingest/testkey\n"
+                                "      - action: read\n        path: ~^sink/\npaths:")
         config += '  "~^sink/":\n    source: publisher\n'
-        (folder / "media.yml").write_text(config)
+        (folder / "mediamtx.yml").write_text(config)
         relay.save_config(folder / "relay.json", {
             "dashboard_password": "integration-password-only",
             "source": f"rtsp://127.0.0.1:{rtsp}/ingest/testkey",
@@ -78,7 +79,7 @@ def main():
                              for name in relay.DESTINATIONS},
         })
         with (folder / "media.log").open("wb") as media_log:
-            media = subprocess.Popen([binary, str(folder / "media.yml")],
+            media = subprocess.Popen([binary, str(folder / "mediamtx.yml")],
                                      stdout=media_log, stderr=subprocess.STDOUT)
             children.append(media)
             try:
@@ -106,11 +107,11 @@ def main():
                 ], check=True, timeout=90)
                 source_log = (folder / "source.log").open("wb")
                 try:
-                    def publish():
+                    def publish(key="testkey"):
                         process = subprocess.Popen([
                             ffmpeg, "-nostdin", "-v", "error", "-re", "-stream_loop", "-1",
                             "-i", str(sample), "-c", "copy", "-f", "flv",
-                            f"rtmp://127.0.0.1:{rtmp}/ingest/testkey",
+                            f"rtmp://127.0.0.1:{rtmp}/ingest/{key}",
                         ], stdout=subprocess.DEVNULL, stderr=source_log)
                         children.append(process)
                         return process
@@ -173,7 +174,7 @@ def main():
                     wait_for(lambda: controller.status()["inbound"]["state"] == "waiting",
                              "inbound disconnect health")
                     assert controller.status()["inbound"]["stats"]["bandwidth_mbps"] == 0
-                    publish()
+                    source = publish()
                     wait_for(lambda: ready("sink/youtube") and ready("sink/x"),
                              "source recovery", timeout=45)
                     wait_for(lambda: controller.status()["inbound"]["state"] == "forwarding"
@@ -184,6 +185,32 @@ def main():
                     controller.action("facebook", "start")
                     wait_for(lambda: ready("sink/facebook"), "destination restart")
                     print("PASS: OBS-style reconnect and individual restart")
+                    for name in relay.DESTINATIONS:
+                        controller.action(name, "stop")
+                    terminate(source)
+                    wait_for(lambda: controller.status()["inbound"]["state"] == "waiting",
+                             "OBS stopped before key rotation")
+                    new_key = "integration-new-key-123456789"
+                    controller.update_ingest("rtmp://127.0.0.1:1935/ingest", new_key,
+                                             "integration-password-only")
+                    wait_for(lambda: any(item["name"] == "ingest/" + new_key for item in paths()),
+                             "MediaMTX hot reload of new key")
+                    rejected = subprocess.run([
+                        ffmpeg, "-nostdin", "-v", "error", "-i", str(sample), "-t", "1",
+                        "-c", "copy", "-f", "flv",
+                        f"rtmp://127.0.0.1:{rtmp}/ingest/testkey",
+                    ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15)
+                    assert rejected.returncode != 0, "Old stream key was accepted"
+                    source = publish(new_key)
+                    wait_for(lambda: controller.status()["inbound"]["state"] == "forwarding",
+                             "new key inbound monitor")
+                    controller.action("youtube", "start")
+                    wait_for(lambda: ready("sink/youtube"), "outbound with new ingest key")
+                    print("PASS: ingest key hot reload, old-key rejection, new-key monitoring and forwarding")
+                    controller.update_account("operator", "changed-integration-password",
+                                              "integration-password-only")
+                    assert ready("sink/youtube"), "Account change interrupted live output"
+                    print("PASS: account update preserves live forwarding")
                     controller.close()
                     wait_for(lambda: all(not ready("sink/" + name) for name in relay.DESTINATIONS),
                              "shutdown cleanup")

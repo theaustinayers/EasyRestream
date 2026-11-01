@@ -73,11 +73,15 @@ sudo bash install.sh
    separately designing TLS, authentication and matching origin checks.
 
 5. In OBS, select a Custom streaming service. Use the server URL and stream key
-   from the access file. Do not add the stream key to the server field:
+   from the dashboard's **OBS ingest** panel. First set the OBS server URL to
+   `rtmp://YOUR_SERVER_IP:1935/ingest` using your reachable server hostname/IP,
+   enter your current dashboard password, and save. The key/full URL are
+   masked by default; click **Show key and URL** to reveal them.
+   Do not add the stream key to the server field:
 
    ```text
    Server:     rtmp://YOUR_SERVER_IP:1935/ingest
-   Stream key: generated secret from access.txt
+   Stream key: current key displayed on the dashboard
    ```
 
    The secret path is the ingest credential, not a public stream name. Only
@@ -122,6 +126,73 @@ sudo bash install.sh
   broadcasts. Manually start the desired destinations again.
 
 ## Operations
+
+### Dashboard account and ingest settings
+
+There is one dashboard account, initially `admin` with the install-generated
+password. Open **Dashboard account** to change its username, password, or both.
+Confirm your current password; leave the new-password fields blank to change
+only the username. Usernames allow 1-64 letters, digits, dots, underscores and
+hyphens. Passwords require 16-256 characters and matching confirmation.
+The backend stores a salted PBKDF2-SHA256 hash, not your dashboard password.
+Existing plaintext dashboard configurations migrate automatically on startup.
+Old credentials stop working immediately after a successful change. The open
+page switches to the new credentials; future visits/browser reloads may prompt
+for the new login. Active streams are not restarted by account changes.
+
+The **OBS ingest** panel displays the server address, masked current key and
+masked full ingest URL. Set a reachable hostname/IP; the loopback dashboard
+address reached through SSH is not the public ingest address. Changing this
+displayed address does not configure DNS, ports, TLS or firewall rules.
+Use the fixed `rtmp://HOST:1935/ingest` format.
+
+To choose a new ingest key, **stop OBS and all outputs**, then enter a new
+16-128-character key (letters, digits, underscores and hyphens) and confirm
+your current dashboard password. Leave the new-key field blank to keep the key.
+The dashboard updates MediaMTX's exact ingest path and permissions and its
+own source configuration; MediaMTX hot-reloads the file. Reconfigure OBS
+before reconnecting, then manually start the desired destinations.
+Key changes are rejected while outputs are active or the monitor sees live/
+stalled input. Always stop OBS first, including during connection retries.
+Custom-edited MediaMTX path layouts must be updated manually instead.
+
+The root-only `access.txt` is an **initial installation snapshot**, not a live
+credential record. After account/key changes, its old values are obsolete;
+use the dashboard and store updated credentials in your password manager.
+Authenticated `/api/ingest` responses contain the ingest secret, whereas
+routine telemetry never includes it or the password hash.
+
+If you forget your dashboard password, stop the dashboard service and reset
+the account locally as root, without putting passwords into shell history:
+
+```bash
+sudo systemctl stop rtmp-relay
+sudo python3 - <<'PY'
+import getpass
+import json
+from pathlib import Path
+import sys
+sys.path.insert(0, "/opt/rtmp-relay")
+from relay import hash_password, save_config, validate_username
+path = Path("/etc/rtmp-relay/config.json")
+data = json.loads(path.read_text())
+with open("/dev/tty", "r+") as terminal:
+    terminal.write("Username: ")
+    terminal.flush()
+    data["dashboard_username"] = validate_username(terminal.readline().strip())
+password = getpass.getpass("New password: ")
+if password != getpass.getpass("Confirm password: "):
+    raise ValueError("Passwords do not match")
+data["dashboard_password_hash"] = hash_password(password)
+data.pop("dashboard_password", None)
+save_config(path, data)
+PY
+sudo chown rtmp-relay:rtmp-relay /etc/rtmp-relay/config.json
+sudo systemctl start rtmp-relay
+```
+
+Because this reset recreates the configuration as root, restoring its service
+ownership is required. Restarting the service leaves all destinations stopped.
 
 ### Live telemetry
 
@@ -188,9 +259,9 @@ ingest paths on errors, so treat its journal as sensitive.
 
 Configuration is in `/etc/rtmp-relay/config.json`. Do not edit it while the
 dashboard service is running; dashboard saves are atomic and could replace
-manual edits. If changing the ingest key, stop both services, replace the key
-in both configurations and the access file, preserve ownership/mode 600,
-update OBS, and restart both services.
+manual edits. Prefer the dashboard for account and ingest key changes. For a
+manual key recovery, stop both services, replace the key in both configurations,
+preserve ownership/mode 600, update OBS, and restart both services.
 
 The service account cannot edit installed program files. The dashboard needs
 write access to its private configuration directory for atomic saves.

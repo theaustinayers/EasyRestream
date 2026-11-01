@@ -3,6 +3,9 @@ const container = document.getElementById("outputs");
 const errorBox = document.getElementById("error");
 const cards = new Map();
 let pending = false;
+let authorization = null;
+let settingsReady = false;
+let settingsSaving = false;
 const inbound = document.getElementById("inbound");
 const telemetry = document.getElementById("telemetry");
 
@@ -32,15 +35,93 @@ function drawStats(element, stats) {
 }
 
 async function request(path, body) {
-  const response = await fetch(path, body ? {
-    method: "POST",
-    headers: {"Content-Type": "application/json", "X-Relay-Control": "1"},
-    body: JSON.stringify(body)
-  } : {});
+  const headers = authorization ? {Authorization: authorization} : {};
+  const options = {headers};
+  if (body) {
+    Object.assign(headers, {"Content-Type": "application/json", "X-Relay-Control": "1"});
+    Object.assign(options, {method: "POST", body: JSON.stringify(body)});
+  }
+  const response = await fetch(path, options);
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
+
+function basicAuthorization(username, password) {
+  const bytes = new TextEncoder().encode(`${username}:${password}`);
+  return "Basic " + btoa(String.fromCharCode(...bytes));
+}
+
+async function loadSettings(username) {
+  const data = await request("/api/ingest");
+  document.getElementById("account-username").value = username;
+  document.getElementById("ingest-server").value = data.server;
+  document.getElementById("ingest-key").value = data.stream_key;
+  document.getElementById("ingest-url").value = data.url;
+  document.getElementById("ingest-note").textContent = data.configured
+    ? "Use OBS server URL and stream key in their separate OBS fields."
+    : "Replace YOUR_SERVER_IP with your server's IP/hostname and save. The SSH dashboard address is not the public ingest address.";
+  settingsReady = true;
+}
+
+document.getElementById("reveal-ingest").onclick = () => {
+  const show = document.getElementById("ingest-key").type === "password";
+  for (const id of ["ingest-key", "ingest-url"]) document.getElementById(id).type = show ? "text" : "password";
+  document.getElementById("reveal-ingest").textContent = show ? "Hide key and URL" : "Show key and URL";
+};
+
+document.getElementById("save-account").onclick = async () => {
+  if (settingsSaving) return;
+  const button = document.getElementById("save-account");
+  const message = document.getElementById("account-message");
+  const username = document.getElementById("account-username").value.trim();
+  const current = document.getElementById("account-current-password").value;
+  const password = document.getElementById("account-password").value;
+  if (password !== document.getElementById("account-confirm-password").value) {
+    message.textContent = "New passwords do not match.";
+    return;
+  }
+  settingsSaving = true;
+  button.disabled = true;
+  try {
+    await request("/api/account", {username, password, current_password: current});
+    authorization = basicAuthorization(username, password || current);
+    for (const id of ["account-current-password", "account-password", "account-confirm-password"]) {
+      document.getElementById(id).value = "";
+    }
+    message.textContent = "Account saved. This page uses the new login immediately; on your next visit, sign in with the new credentials.";
+    errorBox.textContent = "";
+  } catch (error) {
+    message.textContent = error.message;
+  } finally {
+    settingsSaving = false;
+    button.disabled = false;
+  }
+};
+
+document.getElementById("save-ingest").onclick = async () => {
+  if (settingsSaving) return;
+  const button = document.getElementById("save-ingest");
+  const message = document.getElementById("ingest-message");
+  settingsSaving = true;
+  button.disabled = true;
+  try {
+    await request("/api/ingest", {
+      server: document.getElementById("ingest-server").value.trim(),
+      stream_key: document.getElementById("new-ingest-key").value,
+      current_password: document.getElementById("ingest-password").value
+    });
+    document.getElementById("new-ingest-key").value = "";
+    document.getElementById("ingest-password").value = "";
+    await loadSettings(document.getElementById("account-username").value);
+    message.textContent = "Ingest settings saved. Use the displayed server URL and key in OBS.";
+  } catch (error) {
+    message.textContent = error.message;
+  } finally {
+    settingsSaving = false;
+    button.disabled = false;
+  }
+};
 
 function draw(data) {
   telemetry.textContent = `Telemetry live | Updated ${new Date().toLocaleTimeString()} | Rates averaged over approximately 5 seconds`;
@@ -110,7 +191,9 @@ for (const [name, title] of [["youtube", "YouTube"], ["facebook", "Facebook"], [
 
 async function refresh() {
   try {
-    draw(await request("/api/status"));
+    const data = await request("/api/status");
+    draw(data);
+    if (!settingsReady) await loadSettings(data.username);
   } catch (error) {
     errorBox.textContent = `Dashboard unavailable: ${error.message}`;
     telemetry.textContent = "Telemetry unavailable; displayed values are stale.";
@@ -118,7 +201,7 @@ async function refresh() {
   }
 }
 async function poll() {
-  if (!pending) await refresh();
+  if (!pending && !settingsSaving) await refresh();
   setTimeout(poll, 1000);
 }
 poll();

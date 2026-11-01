@@ -15,6 +15,32 @@
       Verify platform compatibility before going live. Stop disconnects the destination;
       reconnecting may not preserve the broadcast.</aside>
     <p id="error" role="alert"></p>
+    <section aria-label="Ingest settings">
+      <article id="ingest-settings">
+        <h2>OBS ingest</h2>
+        <p class="info">Set the address reachable from OBS. This does not change server ports or firewall rules.</p>
+        <label>OBS server URL<input id="ingest-server" type="text" spellcheck="false" placeholder="rtmp://YOUR_SERVER_IP:1935/ingest"></label>
+        <label>Current stream key<input id="ingest-key" type="password" readonly autocomplete="off"></label>
+        <label>Full ingest URL<input id="ingest-url" type="password" readonly autocomplete="off"></label>
+        <div class="buttons"><button id="reveal-ingest" type="button">Show key and URL</button></div>
+        <p id="ingest-note" class="info"></p>
+        <label>New stream key (leave blank to keep current key)<input id="new-ingest-key" type="password" autocomplete="off" minlength="16" maxlength="128"></label>
+        <label>Current dashboard password to save ingest settings<input id="ingest-password" type="password" autocomplete="current-password"></label>
+        <div class="buttons"><button id="save-ingest" type="button">Save ingest settings</button></div>
+        <p id="ingest-message" role="status"></p>
+        <p class="info">To change the key, stop OBS and every output first. Update OBS with the new key before reconnecting.</p>
+      </article>
+    </section>
+    <details id="account-settings">
+      <summary>Dashboard account</summary>
+      <p class="info">One editable dashboard account. Account changes do not stop active streams.</p>
+      <label>Username<input id="account-username" type="text" autocomplete="username" maxlength="64"></label>
+      <label>Current password<input id="account-current-password" type="password" autocomplete="current-password"></label>
+      <label>New password (leave blank to keep current password)<input id="account-password" type="password" autocomplete="new-password" minlength="16" maxlength="256"></label>
+      <label>Confirm new password<input id="account-confirm-password" type="password" autocomplete="new-password"></label>
+      <div class="buttons"><button id="save-account" type="button">Save account</button></div>
+      <p id="account-message" role="status"></p>
+    </details>
     <p id="telemetry">Connecting to telemetry...</p>
     <section aria-label="Inbound stream">
       <article id="inbound">

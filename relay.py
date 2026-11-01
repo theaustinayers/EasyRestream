@@ -3,12 +3,14 @@
 import argparse
 import base64
 import collections
+import hashlib
 import hmac
 import json
 import logging
 import os
 from pathlib import Path
 import re
+import secrets
 import signal
 import subprocess
 import tempfile
@@ -20,6 +22,30 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 DESTINATIONS = ("youtube", "facebook", "x")
 ROOT = Path(__file__).resolve().parent
 LOG = logging.getLogger("relay")
+
+
+def validate_username(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", value):
+        raise ValueError("Username must be 1-64 letters, digits, dots, underscores or hyphens.")
+    return value
+
+
+def hash_password(password: str) -> str:
+    if not isinstance(password, str) or not 16 <= len(password) <= 256:
+        raise ValueError("Password must be 16-256 characters.")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600000)
+    return f"pbkdf2_sha256$600000${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    if not isinstance(password, str) or len(password) > 256:
+        return False
+    scheme, iterations, salt, expected = encoded.split("$")
+    if scheme != "pbkdf2_sha256" or iterations != "600000":
+        raise ValueError("Unsupported password hash.")
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), int(iterations))
+    return hmac.compare_digest(digest.hex(), expected)
 
 
 def validate_url(value: str) -> str:
@@ -39,13 +65,16 @@ def validate_url(value: str) -> str:
 
 
 def save_config(path: Path, data: dict) -> None:
+    save_text(path, json.dumps(data, indent=2) + "\n")
+
+
+def save_text(path: Path, text: str) -> None:
     fd, name = tempfile.mkstemp(prefix=".relay-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as output:
             if os.name != "nt":
                 os.fchmod(output.fileno(), 0o600)
-            json.dump(data, output, indent=2)
-            output.write("\n")
+            output.write(text)
             output.flush()
             os.fsync(output.fileno())
         os.replace(name, path)
@@ -259,9 +288,14 @@ class Controller:
         if os.name != "nt" and config_path.stat().st_mode & 0o077:
             raise ValueError("Configuration must not be accessible to group/others (chmod 600).")
         self.config = json.loads(config_path.read_text(encoding="utf-8"))
-        if not isinstance(self.config.get("dashboard_password"), str) or len(
-                self.config["dashboard_password"]) < 16:
-            raise ValueError("Dashboard password must have at least 16 characters.")
+        self.config.setdefault("dashboard_username", "admin")
+        validate_username(self.config["dashboard_username"])
+        if "dashboard_password_hash" not in self.config:
+            self.config["dashboard_password_hash"] = hash_password(self.config["dashboard_password"])
+            del self.config["dashboard_password"]
+            save_config(self.path, self.config)
+            LOG.info("Migrated dashboard credentials to a salted password hash")
+        verify_password("", self.config["dashboard_password_hash"])
         source = urlsplit(self.config["source"])
         if source.scheme != "rtsp" or source.hostname != "127.0.0.1":
             raise ValueError("Source must be a local MediaMTX RTSP URL.")
@@ -272,6 +306,7 @@ class Controller:
             if url:
                 validate_url(url)
         self.lock = threading.RLock()
+        self.auth_digest = None
         self.outputs = {name: Output(name, self.config["source"],
                                     self.config.get("ffmpeg", "ffmpeg"))
                         for name in DESTINATIONS}
@@ -285,9 +320,108 @@ class Controller:
             inbound = self.inbound.snapshot()
             if inbound["state"] in ("connecting", "retrying"):
                 inbound["state"] = "waiting"
-            return {"inbound": inbound, "outputs": [dict(output.snapshot(),
+            return {"username": self.config["dashboard_username"],
+                    "ingest_server": self.config.get("ingest_server", ""),
+                    "inbound": inbound, "outputs": [dict(output.snapshot(),
                                      configured=bool(self.config["destinations"][name]))
                                 for name, output in self.outputs.items()]}
+
+    def authenticate(self, header: str) -> bool:
+        digest = hashlib.sha256(header.encode()).digest()
+        with self.lock:
+            if self.auth_digest is not None and hmac.compare_digest(self.auth_digest, digest):
+                return True
+            try:
+                scheme, value = header.split(" ", 1)
+                if scheme != "Basic":
+                    return False
+                decoded = base64.b64decode(value, validate=True).decode("utf-8")
+                username, password = decoded.split(":", 1)
+            except (ValueError, UnicodeError):
+                return False
+            if not hmac.compare_digest(username.encode(), self.config["dashboard_username"].encode()):
+                return False
+            if not verify_password(password, self.config["dashboard_password_hash"]):
+                return False
+            # Cache only the verified header digest; polling does not repeatedly run PBKDF2.
+            self.auth_digest = digest
+            return True
+
+    def update_account(self, username: str, password: str, current_password: str) -> None:
+        with self.lock:
+            if not verify_password(current_password, self.config["dashboard_password_hash"]):
+                raise ValueError("Current password is incorrect.")
+            username = validate_username(username)
+            if not isinstance(password, str):
+                raise ValueError("Enter a password, or leave it empty to keep your password.")
+            updated = dict(self.config, dashboard_username=username)
+            if password:
+                updated["dashboard_password_hash"] = hash_password(password)
+            save_config(self.path, updated)
+            self.config = updated
+            self.auth_digest = None
+
+    def ingest_settings(self) -> dict:
+        with self.lock:
+            path, key = self.config["source"].rsplit("/", 1)
+            prefix = urlsplit(path).path
+            server = self.config.get("ingest_server", "") or f"rtmp://YOUR_SERVER_IP:1935{prefix}"
+            return {"server": server, "stream_key": key, "url": f"{server}/{key}",
+                    "configured": bool(self.config.get("ingest_server"))}
+
+    def update_ingest(self, server: str, key: str, current_password: str) -> None:
+        with self.lock:
+            if not verify_password(current_password, self.config["dashboard_password_hash"]):
+                raise ValueError("Current password is incorrect.")
+            server = validate_url(server)
+            parsed = urlsplit(server)
+            prefix, old_key = self.config["source"].rsplit("/", 1)
+            if (parsed.scheme != "rtmp" or parsed.port != 1935 or parsed.query
+                    or parsed.path != urlsplit(prefix).path or parsed.hostname == "your_server_ip"):
+                raise ValueError(f"Use rtmp://YOUR_HOST:1935{urlsplit(prefix).path} as the OBS server URL.")
+            if not isinstance(key, str) or (key and not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key)):
+                raise ValueError("Stream key must be 16-128 letters, digits, underscores or hyphens.")
+            key = key or old_key
+            updated = dict(self.config, ingest_server=server, source=f"{prefix}/{key}")
+            if key == old_key:
+                save_config(self.path, updated)
+                self.config = updated
+                return
+            if any(output.thread is not None and output.thread.is_alive()
+                   for output in self.outputs.values()):
+                raise ValueError("Stop all destinations before changing the ingest key.")
+            if self.inbound.snapshot()["state"] in ("forwarding", "stalled"):
+                raise ValueError("Stop OBS before changing the ingest key.")
+            media_path = self.path.parent / "mediamtx.yml"
+            original = media_path.read_text(encoding="utf-8")
+            old_path = urlsplit(self.config["source"]).path.lstrip("/")
+            new_path = urlsplit(updated["source"]).path.lstrip("/")
+            if original.count(old_path) != 3:
+                raise ValueError("MediaMTX configuration differs from the installer template; update it manually.")
+            media = original.replace(old_path, new_path)
+            monitoring = self.inbound.thread is not None
+            self.inbound.stop()
+            try:
+                # MediaMTX hot-reloads this file; roll it back if the second save fails.
+                save_text(media_path, media)
+                try:
+                    save_config(self.path, updated)
+                except OSError:
+                    LOG.error("Configuration save failed; restoring the previous MediaMTX key")
+                    save_text(media_path, original)
+                    raise
+            except OSError:
+                LOG.exception("Ingest key update failed; check both configuration files before reconnecting OBS")
+                if monitoring:
+                    self.inbound.start(os.devnull)
+                raise
+            self.config = updated
+            self.inbound = Output("inbound", updated["source"], self.config.get("ffmpeg", "ffmpeg"))
+            for output in self.outputs.values():
+                output.source = updated["source"]
+            if monitoring:
+                self.inbound.start(os.devnull)
+            LOG.info("Ingest key changed; update OBS before reconnecting")
 
     def action(self, name: str, action: str, url=None) -> None:
         with self.lock:
@@ -348,15 +482,12 @@ def make_handler(controller: Controller):
                              "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
             self.send_header("Connection", "close")
             if code == 401:
-                self.send_header("WWW-Authenticate", 'Basic realm="RTMP relay"')
+                self.send_header("WWW-Authenticate", 'Basic realm="RTMP relay", charset="UTF-8"')
             self.end_headers()
             self.wfile.write(body)
 
         def authorized(self):
-            expected = "Basic " + base64.b64encode(
-                ("admin:" + controller.config["dashboard_password"]).encode()).decode()
-            if not hmac.compare_digest(self.headers.get("Authorization", "").encode(),
-                                       expected.encode()):
+            if not controller.authenticate(self.headers.get("Authorization", "")):
                 self.respond(401, {"error": "Authentication required."})
                 return False
             host = self.headers.get("Host", "")
@@ -371,6 +502,9 @@ def make_handler(controller: Controller):
                 return
             if self.path == "/api/status":
                 self.respond(200, controller.status())
+                return
+            if self.path == "/api/ingest":
+                self.respond(200, controller.ingest_settings())
                 return
             files = {"/": ("index.html", "text/html; charset=utf-8"),
                      "/app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -389,7 +523,7 @@ def make_handler(controller: Controller):
                     or (origin is not None and origin != "http://" + self.headers["Host"])):
                 self.respond(403, {"error": "Invalid control request."})
                 return
-            if self.path != "/api/action":
+            if self.path not in ("/api/action", "/api/account", "/api/ingest"):
                 self.respond(404, {"error": "Not found."})
                 return
             try:
@@ -397,16 +531,26 @@ def make_handler(controller: Controller):
                 if not 0 < length <= 8192 or self.headers.get("Content-Type") != "application/json":
                     raise ValueError("Expected a JSON body of at most 8192 bytes.")
                 data = json.loads(self.rfile.read(length))
-                if not isinstance(data, dict) or set(data) - {"name", "action", "url"}:
+                fields = {"/api/action": {"name", "action", "url"},
+                          "/api/account": {"username", "password", "current_password"},
+                          "/api/ingest": {"server", "stream_key", "current_password"}}
+                if not isinstance(data, dict) or set(data) - fields[self.path]:
                     raise ValueError("Invalid action payload.")
-                controller.action(data.get("name"), data.get("action"), data.get("url"))
-            except (ValueError, TypeError, UnicodeError):
+                if self.path == "/api/account":
+                    controller.update_account(data.get("username"), data.get("password"),
+                                              data.get("current_password"))
+                elif self.path == "/api/ingest":
+                    controller.update_ingest(data.get("server"), data.get("stream_key"),
+                                             data.get("current_password"))
+                else:
+                    controller.action(data.get("name"), data.get("action"), data.get("url"))
+            except (ValueError, TypeError, UnicodeError) as exc:
                 LOG.warning("Rejected invalid dashboard action")
-                self.respond(400, {"error": "Invalid request: use a valid URL, configure before starting, and stop before editing."})
+                self.respond(400, {"error": str(exc)})
                 return
             except OSError:
-                LOG.exception("Cannot save destination configuration")
-                self.respond(500, {"error": "Could not save configuration; check service logs."})
+                LOG.exception("Cannot save dashboard or ingest configuration")
+                self.respond(500, {"error": "Could not save configuration; check service logs and verify ingest configuration before reconnecting OBS."})
                 return
             self.respond(200, controller.status())
 

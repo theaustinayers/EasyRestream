@@ -118,6 +118,98 @@ class RelayTests(unittest.TestCase):
         self.controller.action("youtube", "configure", "")
         self.assertFalse(self.controller.status()["outputs"][0]["configured"])
 
+    def auth(self, username, password):
+        return "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
+
+    def test_legacy_credentials_migrate_and_auth_cache_is_invalidated(self):
+        stored = json.loads(self.path.read_text())
+        self.assertNotIn("dashboard_password", stored)
+        self.assertNotIn(self.password, self.path.read_text())
+        self.assertEqual(stored["dashboard_username"], "admin")
+        old = self.auth("admin", self.password)
+        self.assertTrue(self.controller.authenticate(old))
+        new_password = "new-password-at-least-16"
+        self.controller.update_account("operator", new_password, self.password)
+        self.assertFalse(self.controller.authenticate(old))
+        self.assertTrue(self.controller.authenticate(self.auth("operator", new_password)))
+        other = relay.Controller(self.path)
+        self.assertTrue(other.authenticate(self.auth("operator", new_password)))
+        other.close()
+
+    def test_account_validation_and_failed_save(self):
+        for username, password, current in (("bad:name", "", self.password),
+                                            ("admin", "short", self.password),
+                                            ("admin", "", "incorrect")):
+            with self.assertRaises(ValueError):
+                self.controller.update_account(username, password, current)
+        with patch.object(relay, "save_config", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.controller.update_account("operator", "", self.password)
+        self.assertTrue(self.controller.authenticate(self.auth("admin", self.password)))
+        self.controller.update_account("operator", "", self.password)
+        self.assertTrue(self.controller.authenticate(self.auth("operator", self.password)))
+
+    def media_config(self):
+        installer = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
+        template = installer.split('media = f"""', 1)[1].split('"""', 1)[0]
+        path = self.path.parent / "mediamtx.yml"
+        relay.save_text(path, template.replace("{key}", "testkey"))
+        return path
+
+    def test_ingest_address_and_key_rotation_persist(self):
+        path = self.media_config()
+        new_key = "my-new-stream-key-123456"
+        self.controller.update_ingest("rtmp://stream.example.org:1935/ingest",
+                                      new_key, self.password)
+        settings = self.controller.ingest_settings()
+        self.assertEqual(settings["url"], f"rtmp://stream.example.org:1935/ingest/{new_key}")
+        self.assertNotIn("ingest/testkey", path.read_text())
+        self.assertEqual(path.read_text().count("ingest/" + new_key), 3)
+        for output in self.controller.outputs.values():
+            self.assertTrue(output.source.endswith("/" + new_key))
+        self.assertTrue(self.controller.inbound.source.endswith("/" + new_key))
+        self.assertNotIn(new_key, json.dumps(self.controller.status()))
+        self.controller.update_ingest("rtmp://other.example.org:1935/ingest", "", self.password)
+        self.assertEqual(self.controller.ingest_settings()["stream_key"], new_key)
+
+    def test_ingest_invalid_input_and_active_source_rejected(self):
+        self.media_config()
+        for server, key in (("rtmp://YOUR_SERVER_IP:1935/ingest", ""),
+                            ("rtmps://host:1935/ingest", ""), ("rtmp://host:9999/ingest", ""),
+                            ("rtmp://host:1935/wrong", ""), ("rtmp://host:1935/ingest", "short"),
+                            ("rtmp://host:1935/ingest", "../invalid-key-1234")):
+            with self.assertRaises(ValueError):
+                self.controller.update_ingest(server, key, self.password)
+        self.controller.inbound.state = "forwarding"
+        self.controller.inbound.last_progress = time.monotonic()
+        with self.assertRaises(ValueError):
+            self.controller.update_ingest("rtmp://host:1935/ingest", "new-key-1234567890", self.password)
+        self.controller.inbound.state = "stopped"
+        output = self.controller.outputs["youtube"]
+        output.thread = unittest.mock.Mock()
+        output.thread.is_alive.return_value = True
+        with self.assertRaises(ValueError):
+            self.controller.update_ingest("rtmp://host:1935/ingest", "new-key-1234567890", self.password)
+        output.thread = None
+
+    def test_key_rotation_rolls_back_media_when_config_save_fails(self):
+        path = self.media_config()
+        original = path.read_text()
+        with patch.object(relay, "save_config", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.controller.update_ingest("rtmp://host:1935/ingest",
+                                              "new-key-1234567890", self.password)
+        self.assertEqual(path.read_text(), original)
+        self.assertEqual(self.controller.ingest_settings()["stream_key"], "testkey")
+
+    def test_auth_invalid_headers_and_hash_caching(self):
+        for header in ("", "Bearer token", "Basic ???", "Basic " + base64.b64encode(b"no-colon").decode()):
+            self.assertFalse(self.controller.authenticate(header))
+        header = self.auth("admin", self.password)
+        self.assertTrue(self.controller.authenticate(header))
+        with patch.object(relay, "verify_password", side_effect=AssertionError("Cache was not used")):
+            self.assertTrue(self.controller.authenticate(header))
+
     def test_invalid_actions_and_unconfigured_start(self):
         for args in (("youtube", "start"), ("bad", "stop"),
                      ("youtube", "pause"), ("youtube", "configure", 0)):
@@ -221,6 +313,33 @@ class HTTPTests(unittest.TestCase):
                                     {"Content-Type": "application/json", "X-Relay-Control": "1"})
         self.assertEqual(status, 500)
         self.assertIn(b"Could not save", body)
+
+    def test_account_endpoint_reauth_and_password_protection(self):
+        headers = {"Content-Type": "application/json", "X-Relay-Control": "1"}
+        body = json.dumps({"username": "operator", "password": "new-password-long-enough",
+                           "current_password": self.password})
+        self.assertEqual(self.call("POST", "/api/account", body, auth=False)[0], 401)
+        self.assertEqual(self.call("POST", "/api/account", body)[0], 403)
+        status, response = self.call("POST", "/api/account", body, headers)
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"new-password", response)
+        self.assertEqual(self.call("GET", "/api/status")[0], 401)
+        new_auth = "Basic " + base64.b64encode(b"operator:new-password-long-enough").decode()
+        self.assertEqual(self.call("GET", "/api/status", headers={"Authorization": new_auth})[0], 200)
+
+    def test_ingest_endpoint_requires_auth_and_safe_write(self):
+        self.assertEqual(self.call("GET", "/api/ingest", auth=False)[0], 401)
+        status, response = self.call("GET", "/api/ingest")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(response)["stream_key"], "testkey")
+        self.assertNotIn(b"testkey", self.call("GET", "/api/status")[1])
+        headers = {"Content-Type": "application/json", "X-Relay-Control": "1"}
+        body = json.dumps({"server": "rtmp://host:1935/ingest", "stream_key": "",
+                           "current_password": "wrong"})
+        self.assertEqual(self.call("POST", "/api/ingest", body, headers)[0], 400)
+        body = json.dumps({"server": "rtmp://host:1935/ingest", "stream_key": "",
+                           "current_password": self.password})
+        self.assertEqual(self.call("POST", "/api/ingest", body, headers)[0], 200)
 
 
 if __name__ == "__main__":
