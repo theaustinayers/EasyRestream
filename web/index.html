@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RTMP Relay</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header><span class="tag">PASSTHROUGH ONLY</span><h1>RTMP Relay</h1>
+      <p>One source. Three independent outputs. No transcoding or placeholder.</p></header>
+    <aside>Every destination receives your OBS resolution, bitrate and codecs unchanged.
+      Verify platform compatibility before going live. Stop disconnects the destination;
+      reconnecting may not preserve the broadcast.</aside>
+    <p id="error" role="alert"></p>
+    <section id="outputs" aria-label="Destinations"></section>
+    <footer>Forwarding means FFmpeg reports output progress, not verified platform broadcast health.
+      Source failures trigger retries (up to 30 seconds between attempts). All outputs start stopped after a service restart.</footer>
+  </main>
+</body>
+</html>

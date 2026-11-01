@@ -1,0 +1,26 @@
+name: Ubuntu 24.04 validation
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check installer syntax
+        run: bash -n install.sh
+      - name: Install on an ephemeral Ubuntu runner
+        run: sudo bash install.sh
+      - name: Unit and dashboard HTTP tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Real 4K60 passthrough, controls and reconnects
+        run: python3 tests/integration.py --mediamtx /usr/local/bin/rtmp-relay-mediamtx
+      - name: Show service status
+        if: always()
+        run: |
+          sudo systemctl status rtmp-relay-media rtmp-relay --no-pager || true
+          sudo journalctl -u rtmp-relay-media -u rtmp-relay -n 40 --no-pager
