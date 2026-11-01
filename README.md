@@ -1,6 +1,7 @@
 # Ubuntu 26.04 lightweight RTMP relay
 
-One OBS input, three independently controlled RTMP(S) outputs, **no GPU,
+One OBS input, any number of independently controlled RTMP(S) outputs (several
+per platform for YouTube, Facebook and X), **no GPU,
 transcoding, resizing, placeholder, recording or preview**. MediaMTX v1.21.3
 handles ingest. One FFmpeg stream-copy process per enabled destination handles
 egress. The dashboard uses Ubuntu's system Python 3 and only the standard library.
@@ -24,7 +25,8 @@ broadcasts in normal-latency mode. See
 Do not treat a successful local relay test as proof of platform compatibility.
 
 For example, 40 Mbps to each of three outputs needs about 120 Mbps of server
-egress, plus audio/protocol overhead and capacity headroom. OBS still uploads
+egress, plus audio/protocol overhead and capacity headroom. Every started
+destination adds another full copy of your bitrate. OBS still uploads
 only one feed. There is no zero-latency guarantee. CPU/RAM requirements depend
 on bitrate, encryption and hardware; benchmark your actual workload.
 
@@ -99,18 +101,28 @@ sudo bash install.sh
    manage the allowlist or use a VPN. Ingest RTMP is unencrypted: use a trusted
    private network/VPN for confidentiality. A leaked ingest key must be rotated.
 
-7. Start OBS. In each destination card, save the **full platform RTMPS URL
-   including its stream key**, then click Start. RTMP is also accepted if the
-   platform requires it, but RTMPS is recommended. Destination keys are stored
-   in a mode-600 file and never returned by the dashboard API.
+7. Start OBS. Under **Destinations**, click **Add destination** in the YouTube,
+   Facebook or X section. Enter an optional name, the platform **server URL**
+   and the **stream key** (use **Show key** to check what you typed). Pasting a
+   full URL such as `rtmp://a.rtmp.youtube.com/live2/KEY` into the server field
+   splits it into server URL and key automatically. Save, then click **Start**.
+   RTMP is also accepted if the platform requires it, but RTMPS is recommended.
+   Destination keys are stored in the mode-600 config file. Only the
+   authenticated `/api/destinations` endpoint returns them (for **Show key** and
+   **Edit**); the 1-second status polling never includes them.
 
 ## Controls and failure behavior
 
+- Save up to 30 destinations, including several per platform (for example a
+  main and a backup YouTube channel). Each one has its own **Start**, **Stop**,
+  **Edit**, **Delete**, telemetry and health light:
+  green = forwarding, yellow = connecting or stalled, red = failing/retrying,
+  grey = stopped. The OBS inbound card uses the same lights (red = no OBS input).
 - **Start** connects one destination; it does not start OBS or create a platform
   broadcast/event. Complete any platform-specific go-live steps separately.
 - **Stop** disconnects only that destination. There is no pause button: without
   a placeholder, a genuine continuous pause is not possible.
-- **Save/Clear URL** is available only while the destination is stopped.
+- **Edit/Delete** are available only while the destination is stopped.
 - **Forwarding** means FFmpeg reports increasing output timestamps. It does
   not confirm viewers can watch or that the platform accepts the profile.
 - **Stalled** means no output timestamp progress for over five seconds.
@@ -121,9 +133,11 @@ sudo bash install.sh
   buffering of a complete outage, no placeholder and no guarantee the platform
   keeps the original broadcast alive. Source problems may affect all outputs;
   destination problems have independent processes and retry schedules.
-- Destination URLs persist; **start/stop intent does not**. After a reboot or
+- Destinations persist; **start/stop intent does not**. After a reboot or
   dashboard service restart all outputs are stopped to prevent accidental
-  broadcasts. Manually start the desired destinations again.
+  broadcasts. Manually start the desired destinations again. Configurations
+  from older versions (one full URL per platform) are converted automatically
+  on first start.
 
 ## Operations
 

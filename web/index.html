@@ -10,7 +10,7 @@
 <body>
   <main>
     <header><span class="tag">PASSTHROUGH ONLY</span><h1>RTMP Relay</h1>
-      <p>One source. Three independent outputs. No transcoding or placeholder.</p></header>
+      <p>One source. Multiple independent outputs per platform. No transcoding or placeholder.</p></header>
     <aside>Every destination receives your OBS resolution, bitrate and codecs unchanged.
       Verify platform compatibility before going live. Stop disconnects the destination;
       reconnecting may not preserve the broadcast.</aside>
@@ -45,11 +45,17 @@
     <p id="telemetry">Connecting to telemetry...</p>
     <section aria-label="Inbound stream">
       <article id="inbound">
-        <div class="heading"><h2>OBS inbound</h2><span class="state">Loading</span></div>
+        <div class="heading"><div class="title"><span class="light" role="img"></span><h2>OBS inbound</h2></div><span class="state">Loading</span></div>
         <p class="info">Monitoring the source independently of destination controls.</p>
         <div class="stats"></div><pre></pre>
       </article>
     </section>
+    <h2 class="section">Destinations</h2>
+    <p class="info">Save as many destinations per platform as you need. Each one starts and stops independently.
+      Health: <span class="legend" data-health="green"></span> forwarding
+      <span class="legend" data-health="yellow"></span> connecting/stalled
+      <span class="legend" data-health="red"></span> failing/retrying
+      <span class="legend" data-health="off"></span> stopped</p>
     <section id="outputs" aria-label="Destinations"></section>
     <footer>Forwarding means FFmpeg reports output progress, not verified platform broadcast health.
       Rates are five-second local encoded-payload estimates, excluding network/TLS overhead.

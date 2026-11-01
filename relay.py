@@ -20,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 DESTINATIONS = ("youtube", "facebook", "x")
+TITLES = {"youtube": "YouTube", "facebook": "Facebook", "x": "X"}
+MAX_DESTINATIONS = 30
 ROOT = Path(__file__).resolve().parent
 LOG = logging.getLogger("relay")
 
@@ -62,6 +64,44 @@ def validate_url(value: str) -> str:
             or (port is not None and port == 0)):
         raise ValueError("Use an RTMP(S) URL with a stream-key path and no userinfo or fragment.")
     return value
+
+
+def split_url(value: str) -> tuple[str, str]:
+    """Split a full RTMP(S) URL into its server URL and final-segment stream key."""
+    validate_url(value)
+    parsed = urlsplit(value)
+    prefix, _, key = parsed.path.rpartition("/")
+    if not key:
+        raise ValueError("The URL does not end with a stream key.")
+    server = f"{parsed.scheme}://{parsed.netloc}{prefix}"
+    return server, key + (f"?{parsed.query}" if parsed.query else "")
+
+
+def validate_destination(platform, name, server, key) -> dict:
+    if platform not in DESTINATIONS:
+        raise ValueError("Platform must be youtube, facebook or x.")
+    if not isinstance(name, str) or len(name.strip()) > 64 or any(ord(c) < 32 for c in name):
+        raise ValueError("Name must be at most 64 characters.")
+    if not isinstance(server, str) or not isinstance(key, str):
+        raise ValueError("Server URL and stream key must be text.")
+    server, key = server.strip().rstrip("/"), key.strip()
+    if not key:
+        raise ValueError("Enter the stream key.")
+    if (len(key) > 512 or "/" in key or "#" in key
+            or any(c.isspace() or ord(c) < 32 for c in key)):
+        raise ValueError("Stream key must be 1-512 characters without spaces, slashes or #.")
+    try:
+        parsed = urlsplit(server)
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("Invalid server URL.") from exc
+    if (parsed.scheme not in ("rtmp", "rtmps") or not parsed.hostname or parsed.username
+            or parsed.password or parsed.query or parsed.fragment
+            or any(c.isspace() or ord(c) < 32 for c in server)):
+        raise ValueError("Server URL must look like rtmp(s)://host/app, without the stream key.")
+    validate_url(f"{server}/{key}")
+    return {"platform": platform, "name": name.strip() or TITLES[platform],
+            "server": server, "key": key}
 
 
 def save_config(path: Path, data: dict) -> None:
@@ -299,17 +339,32 @@ class Controller:
         source = urlsplit(self.config["source"])
         if source.scheme != "rtsp" or source.hostname != "127.0.0.1":
             raise ValueError("Source must be a local MediaMTX RTSP URL.")
-        destinations = self.config["destinations"]
-        if set(destinations) != set(DESTINATIONS):
-            raise ValueError("Configure exactly youtube, facebook and x.")
-        for url in destinations.values():
-            if url:
-                validate_url(url)
+        destinations = self.config.get("destinations", [])
+        if isinstance(destinations, dict):
+            # Older versions stored exactly one full URL per platform.
+            migrated = []
+            for platform in DESTINATIONS:
+                if destinations.get(platform):
+                    server, key = split_url(destinations[platform])
+                    migrated.append(dict(validate_destination(platform, "", server, key), id=platform))
+            self.config["destinations"] = destinations = migrated
+            save_config(self.path, self.config)
+            LOG.info("Migrated destinations to the multi-destination format")
+        if not isinstance(destinations, list) or len(destinations) > MAX_DESTINATIONS:
+            raise ValueError("Destinations must be a list of at most %d entries." % MAX_DESTINATIONS)
+        ids = set()
+        for item in destinations:
+            if (not isinstance(item, dict) or not re.fullmatch(r"[a-z0-9]{1,32}", str(item.get("id")))
+                    or item["id"] in ids):
+                raise ValueError("Each destination needs a unique id.")
+            ids.add(item["id"])
+            validate_destination(item.get("platform"), item.get("name", ""),
+                                 item.get("server"), item.get("key"))
         self.lock = threading.RLock()
         self.auth_digest = None
-        self.outputs = {name: Output(name, self.config["source"],
-                                    self.config.get("ffmpeg", "ffmpeg"))
-                        for name in DESTINATIONS}
+        self.outputs = {item["id"]: Output(item["id"], self.config["source"],
+                                           self.config.get("ffmpeg", "ffmpeg"))
+                        for item in destinations}
         self.inbound = Output("inbound", self.config["source"],
                               self.config.get("ffmpeg", "ffmpeg"))
         if monitor_enabled:
@@ -322,9 +377,57 @@ class Controller:
                 inbound["state"] = "waiting"
             return {"username": self.config["dashboard_username"],
                     "ingest_server": self.config.get("ingest_server", ""),
-                    "inbound": inbound, "outputs": [dict(output.snapshot(),
-                                     configured=bool(self.config["destinations"][name]))
-                                for name, output in self.outputs.items()]}
+                    "inbound": inbound,
+                    "outputs": [dict(self.outputs[item["id"]].snapshot(), id=item["id"],
+                                     platform=item["platform"], label=item["name"],
+                                     server=item["server"])
+                                for item in self.config["destinations"]]}
+
+    def destinations(self) -> list:
+        with self.lock:
+            return [dict(item) for item in self.config["destinations"]]
+
+    def find(self, destination_id) -> dict:
+        for item in self.config["destinations"]:
+            if item["id"] == destination_id:
+                return item
+        raise ValueError("Unknown destination.")
+
+    def save_destination(self, destination_id, platform, name, server, key) -> str:
+        with self.lock:
+            entry = validate_destination(platform, name, server, key)
+            destinations = [dict(item) for item in self.config["destinations"]]
+            if destination_id:
+                current = self.find(destination_id)
+                output = self.outputs[destination_id]
+                if output.thread is not None and output.thread.is_alive():
+                    raise ValueError("Stop this destination before editing it.")
+                entry["id"] = destination_id
+                destinations[self.config["destinations"].index(current)] = entry
+            else:
+                if len(destinations) >= MAX_DESTINATIONS:
+                    raise ValueError(f"At most {MAX_DESTINATIONS} destinations can be saved.")
+                entry["id"] = secrets.token_hex(6)
+                destinations.append(entry)
+            updated = dict(self.config, destinations=destinations)
+            save_config(self.path, updated)
+            self.config = updated
+            if entry["id"] not in self.outputs:
+                self.outputs[entry["id"]] = Output(entry["id"], self.config["source"],
+                                                   self.config.get("ffmpeg", "ffmpeg"))
+            return entry["id"]
+
+    def delete_destination(self, destination_id) -> None:
+        with self.lock:
+            current = self.find(destination_id)
+            output = self.outputs[destination_id]
+            if output.thread is not None and output.thread.is_alive():
+                raise ValueError("Stop this destination before deleting it.")
+            updated = dict(self.config, destinations=[
+                item for item in self.config["destinations"] if item is not current])
+            save_config(self.path, updated)
+            self.config = updated
+            del self.outputs[destination_id]
 
     def authenticate(self, header: str) -> bool:
         digest = hashlib.sha256(header.encode()).digest()
@@ -430,28 +533,14 @@ class Controller:
                 self.inbound.start(os.devnull)
             LOG.info("Ingest key changed; update OBS before reconnecting")
 
-    def action(self, name: str, action: str, url=None) -> None:
+    def action(self, destination_id: str, action: str) -> None:
         with self.lock:
-            if name not in self.outputs:
-                raise ValueError("Unknown destination.")
-            output = self.outputs[name]
+            item = self.find(destination_id)
+            output = self.outputs[destination_id]
             if action == "start":
-                target = self.config["destinations"][name]
-                if not target:
-                    raise ValueError("Save a destination URL first.")
-                output.start(target)
+                output.start(f"{item['server']}/{item['key']}")
             elif action == "stop":
                 output.stop()
-            elif action == "configure":
-                if not isinstance(url, str):
-                    raise ValueError("Destination URL must be a string.")
-                target = validate_url(url) if url else ""
-                if output.thread is not None and output.thread.is_alive():
-                    raise ValueError("Stop this destination before changing its URL.")
-                updated = dict(self.config)
-                updated["destinations"] = dict(self.config["destinations"], **{name: target})
-                save_config(self.path, updated)
-                self.config = updated
             else:
                 raise ValueError("Unknown action.")
 
@@ -513,6 +602,9 @@ def make_handler(controller: Controller):
             if self.path == "/api/ingest":
                 self.respond(200, controller.ingest_settings())
                 return
+            if self.path == "/api/destinations":
+                self.respond(200, {"destinations": controller.destinations()})
+                return
             files = {"/": ("index.html", "text/html; charset=utf-8"),
                      "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                      "/style.css": ("style.css", "text/css; charset=utf-8")}
@@ -530,7 +622,12 @@ def make_handler(controller: Controller):
                     or (origin is not None and origin != "http://" + self.headers["Host"])):
                 self.respond(403, {"error": "Invalid control request."})
                 return
-            if self.path not in ("/api/action", "/api/account", "/api/ingest"):
+            fields = {"/api/action": {"id", "action"},
+                      "/api/destination": {"id", "platform", "name", "server", "key"},
+                      "/api/destination/delete": {"id"},
+                      "/api/account": {"username", "password", "current_password"},
+                      "/api/ingest": {"server", "stream_key", "current_password"}}
+            if self.path not in fields:
                 self.respond(404, {"error": "Not found."})
                 return
             try:
@@ -538,9 +635,6 @@ def make_handler(controller: Controller):
                 if not 0 < length <= 8192 or self.headers.get("Content-Type") != "application/json":
                     raise ValueError("Expected a JSON body of at most 8192 bytes.")
                 data = json.loads(self.rfile.read(length))
-                fields = {"/api/action": {"name", "action", "url"},
-                          "/api/account": {"username", "password", "current_password"},
-                          "/api/ingest": {"server", "stream_key", "current_password"}}
                 if not isinstance(data, dict) or set(data) - fields[self.path]:
                     raise ValueError("Invalid action payload.")
                 if self.path == "/api/account":
@@ -549,8 +643,14 @@ def make_handler(controller: Controller):
                 elif self.path == "/api/ingest":
                     controller.update_ingest(data.get("server"), data.get("stream_key"),
                                              data.get("current_password"))
+                elif self.path == "/api/destination":
+                    controller.save_destination(data.get("id"), data.get("platform"),
+                                                data.get("name", ""), data.get("server"),
+                                                data.get("key"))
+                elif self.path == "/api/destination/delete":
+                    controller.delete_destination(data.get("id"))
                 else:
-                    controller.action(data.get("name"), data.get("action"), data.get("url"))
+                    controller.action(data.get("id"), data.get("action"))
             except (ValueError, TypeError, UnicodeError) as exc:
                 LOG.warning("Rejected invalid dashboard action")
                 self.respond(400, {"error": str(exc)})

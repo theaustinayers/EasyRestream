@@ -1,7 +1,6 @@
 "use strict";
 const container = document.getElementById("outputs");
 const errorBox = document.getElementById("error");
-const cards = new Map();
 let pending = false;
 let authorization = null;
 let settingsReady = false;
@@ -142,34 +141,222 @@ document.getElementById("save-ingest").onclick = async () => {
   }
 };
 
-function draw(data) {
-  telemetry.textContent = `Telemetry live | Updated ${new Date().toLocaleTimeString()} | Rates averaged over approximately 5 seconds`;
-  inbound.querySelector(".state").textContent = data.inbound.state;
-  inbound.querySelector(".state").dataset.state = data.inbound.state;
-  inbound.querySelector("pre").textContent = data.inbound.error;
-  drawStats(inbound.querySelector(".stats"), data.inbound.stats);
-  for (const output of data.outputs) {
-    const card = cards.get(output.name);
-    card.state.textContent = output.state;
-    card.state.dataset.state = output.state;
-    card.info.textContent = `${output.configured ? "Destination saved" : "Not configured"} | Retries: ${output.retries}`;
-    card.details.textContent = output.error;
-    drawStats(card.stats, output.stats);
-    const active = !["stopped", "error"].includes(output.state);
-    card.start.disabled = pending || active || !output.configured;
-    card.stop.disabled = pending || !active;
-    card.save.disabled = pending || active;
-    card.clear.disabled = pending || active || !output.configured;
-    card.input.disabled = pending || active;
+const PLATFORMS = [
+  ["youtube", "YouTube", "rtmp://a.rtmp.youtube.com/live2"],
+  ["facebook", "Facebook", "rtmps://live-api-s.facebook.com:443/rtmp"],
+  ["x", "X", ""]
+];
+const groups = new Map();
+const rows = new Map();
+let saved = new Map();
+let rowOrder = null;
+
+function health(state) {
+  if (state === "forwarding") return ["green", "Healthy: forwarding"];
+  if (state === "connecting") return ["yellow", "Connecting"];
+  if (state === "stalled") return ["yellow", "Warning: no data for over 5 seconds"];
+  if (state === "stopped") return ["off", "Stopped"];
+  if (state === "waiting") return ["red", "No OBS input"];
+  return ["red", state === "retrying" ? "Failed: retrying" : "Error"];
+}
+
+function showState(stateElement, lightElement, state) {
+  const [color, text] = health(state);
+  stateElement.textContent = state;
+  stateElement.dataset.state = state;
+  lightElement.dataset.health = color;
+  lightElement.title = text;
+  lightElement.setAttribute("aria-label", text);
+}
+
+// Splits rtmp(s)://host/app/KEY into server and key; the server must keep at least one path segment.
+function splitFullUrl(value) {
+  const match = value.trim().match(/^(rtmps?:\/\/[^\/?#\s]+\/[^?#\s]*[^\/?#\s])\/([^\/?#\s]+(?:\?[^#\s]*)?)$/i);
+  return match ? [match[1], match[2]] : null;
+}
+
+function maskKey(key) {
+  return key ? "\u2022".repeat(Math.min(Math.max(key.length, 8), 24)) : "";
+}
+
+async function loadDestinations() {
+  const data = await request("/api/destinations");
+  saved = new Map(data.destinations.map(item => [item.id, item]));
+  for (const [id, row] of rows) {
+    const item = saved.get(id);
+    if (item) row.key.textContent = row.revealed ? item.key : maskKey(item.key);
   }
 }
 
-async function act(name, action, url) {
+function openEditor(group, item) {
+  group.editing = item ? item.id : null;
+  group.title.textContent = `${item ? "Edit" : "Add"} ${group.label} destination`;
+  group.name.value = item ? item.name : "";
+  group.server.value = item ? item.server : group.defaultServer;
+  group.key.value = item ? item.key : "";
+  group.key.type = "password";
+  group.reveal.textContent = "Show key";
+  group.message.textContent = "";
+  group.form.hidden = false;
+  group.add.disabled = true;
+  (item ? group.name : group.server).focus();
+}
+
+function closeEditor(group) {
+  group.form.hidden = true;
+  group.editing = null;
+  group.key.value = "";
+  group.add.disabled = false;
+}
+
+function trySplit(group) {
+  const parts = splitFullUrl(group.server.value);
+  if (!parts || group.key.value) return;
+  [group.server.value, group.key.value] = parts;
+  group.message.textContent = "Full URL detected: split into server URL and stream key.";
+}
+
+for (const [platform, label, defaultServer] of PLATFORMS) {
+  const element = document.createElement("article");
+  element.className = "platform";
+  element.innerHTML = `<div class="heading"><h2></h2><button type="button" class="add">Add destination</button></div>
+    <p class="info count"></p>
+    <div class="rows"></div>
+    <form class="editor" hidden>
+      <h3></h3>
+      <label>Name<input class="name" maxlength="64" placeholder="e.g. Main channel"></label>
+      <label>Server URL<input class="server" spellcheck="false" autocomplete="off"></label>
+      <p class="info">Paste the full stream URL here to split it into server URL and stream key automatically.</p>
+      <div class="keyrow"><label>Stream key<input class="key" type="password" spellcheck="false" autocomplete="off" maxlength="512"></label>
+        <button type="button" class="reveal">Show key</button></div>
+      <div class="buttons"><button type="submit" class="start">Save destination</button><button type="button" class="cancel">Cancel</button></div>
+      <p class="message" role="status"></p>
+    </form>`;
+  element.querySelector("h2").textContent = label;
+  const group = {platform, label, defaultServer, editing: null,
+    add: element.querySelector(".add"), count: element.querySelector(".count"),
+    rows: element.querySelector(".rows"), form: element.querySelector("form"),
+    title: element.querySelector("h3"), name: element.querySelector(".name"),
+    server: element.querySelector(".server"), key: element.querySelector(".key"),
+    reveal: element.querySelector(".reveal"), message: element.querySelector(".message")};
+  group.server.placeholder = defaultServer || "rtmps://host/app (from X Media Studio)";
+  group.add.onclick = () => openEditor(group, null);
+  group.form.querySelector(".cancel").onclick = () => closeEditor(group);
+  group.server.addEventListener("paste", () => setTimeout(() => trySplit(group)));
+  group.server.addEventListener("change", () => trySplit(group));
+  group.reveal.onclick = () => {
+    const show = group.key.type === "password";
+    group.key.type = show ? "text" : "password";
+    group.reveal.textContent = show ? "Hide key" : "Show key";
+  };
+  group.form.onsubmit = async event => {
+    event.preventDefault();
+    if (pending) return;
+    trySplit(group);
+    if (!group.server.value.trim() || !group.key.value.trim()) {
+      group.message.textContent = "Enter both the server URL and the stream key.";
+      return;
+    }
+    pending = true;
+    group.message.textContent = "Saving...";
+    try {
+      await request("/api/destination", {id: group.editing || "", platform, name: group.name.value,
+        server: group.server.value, key: group.key.value});
+      closeEditor(group);
+      await loadDestinations();
+      errorBox.textContent = "";
+    } catch (error) {
+      group.message.textContent = error.message;
+    } finally {
+      pending = false;
+      await refresh();
+    }
+  };
+  groups.set(platform, group);
+  container.append(element);
+}
+
+function createRow(output) {
+  const element = document.createElement("div");
+  element.className = "destination";
+  element.innerHTML = `<div class="heading"><div class="title"><span class="light" role="img"></span><strong class="label"></strong></div>
+      <span class="state"></span></div>
+    <p class="info target"></p>
+    <div class="keyline"><span class="info">Stream key:</span> <code class="key"></code><button type="button" class="reveal-key">Show key</button></div>
+    <div class="stats"></div>
+    <div class="buttons"><button type="button" class="start">Start</button><button type="button" class="stop">Stop</button>
+      <button type="button" class="edit">Edit</button><button type="button" class="delete">Delete</button></div>
+    <pre></pre>`;
+  const row = {element, revealed: false, light: element.querySelector(".light"),
+    label: element.querySelector(".label"), state: element.querySelector(".state"),
+    target: element.querySelector(".target"), key: element.querySelector(".key"),
+    revealKey: element.querySelector(".reveal-key"), stats: element.querySelector(".stats"),
+    start: element.querySelector(".start"), stop: element.querySelector(".stop"),
+    edit: element.querySelector(".edit"), remove: element.querySelector(".delete"),
+    details: element.querySelector("pre")};
+  const id = output.id;
+  row.start.onclick = () => act("/api/action", {id, action: "start"});
+  row.stop.onclick = () => act("/api/action", {id, action: "stop"});
+  row.edit.onclick = () => {
+    const item = saved.get(id);
+    if (item) openEditor(groups.get(item.platform), item);
+  };
+  row.remove.onclick = () => {
+    const item = saved.get(id);
+    if (item && confirm(`Delete destination "${item.name}"?`)) act("/api/destination/delete", {id});
+  };
+  row.revealKey.onclick = () => {
+    row.revealed = !row.revealed;
+    row.revealKey.textContent = row.revealed ? "Hide key" : "Show key";
+    const item = saved.get(id);
+    row.key.textContent = item ? (row.revealed ? item.key : maskKey(item.key)) : "";
+  };
+  return row;
+}
+
+function draw(data) {
+  telemetry.textContent = `Telemetry live | Updated ${new Date().toLocaleTimeString()} | Rates averaged over approximately 5 seconds`;
+  showState(inbound.querySelector(".state"), inbound.querySelector(".light"), data.inbound.state);
+  inbound.querySelector("pre").textContent = data.inbound.error;
+  drawStats(inbound.querySelector(".stats"), data.inbound.stats);
+  const order = data.outputs.map(output => output.id).join(",");
+  if (order !== rowOrder) {
+    for (const [id, row] of rows) {
+      if (!data.outputs.some(output => output.id === id)) { row.element.remove(); rows.delete(id); }
+    }
+    for (const output of data.outputs) {
+      if (!rows.has(output.id)) rows.set(output.id, createRow(output));
+      groups.get(output.platform).rows.append(rows.get(output.id).element);
+    }
+    rowOrder = order;
+    loadDestinations().catch(error => { errorBox.textContent = error.message; });
+  }
+  for (const group of groups.values()) {
+    const count = data.outputs.filter(output => output.platform === group.platform).length;
+    group.count.textContent = count ? `${count} saved destination${count === 1 ? "" : "s"}` : "No saved destinations. Use Add destination.";
+  }
+  for (const output of data.outputs) {
+    const row = rows.get(output.id);
+    showState(row.state, row.light, output.state);
+    row.label.textContent = output.label;
+    row.target.textContent = `Server: ${output.server} | Retries: ${output.retries}`;
+    if (!saved.has(output.id)) row.key.textContent = "";
+    row.details.textContent = output.error;
+    drawStats(row.stats, output.stats);
+    const active = !["stopped", "error"].includes(output.state);
+    const editing = groups.get(output.platform).editing === output.id;
+    row.start.disabled = pending || active || editing;
+    row.stop.disabled = pending || !active;
+    row.edit.disabled = pending || active;
+    row.remove.disabled = pending || active || editing;
+  }
+}
+
+async function act(path, body) {
   pending = true;
-  for (const element of container.querySelectorAll("button")) element.disabled = true;
+  for (const element of container.querySelectorAll(".destination button:not(.reveal-key)")) element.disabled = true;
   try {
-    await request("/api/action", {name, action, ...(url !== undefined ? {url} : {})});
-    if (action === "configure") cards.get(name).input.value = "";
+    await request(path, body);
     errorBox.textContent = "";
   } catch (error) {
     errorBox.textContent = error.message;
@@ -177,35 +364,6 @@ async function act(name, action, url) {
     pending = false;
     await refresh();
   }
-}
-
-for (const [name, title] of [["youtube", "YouTube"], ["facebook", "Facebook"], ["x", "X"]]) {
-  const element = document.createElement("article");
-  element.innerHTML = `<div class="heading"><h2></h2><span class="state">Loading</span></div>
-    <p class="info"></p>
-    <div class="stats"></div>
-    <label>Full destination URL including stream key
-      <input type="password" autocomplete="off" spellcheck="false" placeholder="rtmps://host/app/STREAM_KEY">
-    </label>
-    <div class="buttons"><button class="save">Save URL</button><button class="clear">Clear URL</button>
-      <button class="start">Start</button><button class="stop">Stop</button></div>
-    <pre></pre>`;
-  element.querySelector("h2").textContent = title;
-  const card = {state: element.querySelector(".state"), info: element.querySelector(".info"),
-    input: element.querySelector("input"), details: element.querySelector("pre"),
-    stats: element.querySelector(".stats"),
-    save: element.querySelector(".save"), clear: element.querySelector(".clear"),
-    start: element.querySelector(".start"), stop: element.querySelector(".stop")};
-  card.save.onclick = () => {
-    const url = card.input.value.trim();
-    if (!url) { errorBox.textContent = "Enter a URL, or use Clear URL to remove the saved destination."; return; }
-    act(name, "configure", url);
-  };
-  card.clear.onclick = () => act(name, "configure", "");
-  card.start.onclick = () => act(name, "start");
-  card.stop.onclick = () => act(name, "stop");
-  cards.set(name, card);
-  container.append(element);
 }
 
 async function refresh() {
@@ -216,9 +374,10 @@ async function refresh() {
   } catch (error) {
     errorBox.textContent = `Dashboard unavailable: ${error.message}`;
     telemetry.textContent = "Telemetry unavailable; displayed values are stale.";
-    for (const element of container.querySelectorAll("button")) element.disabled = true;
+    for (const element of container.querySelectorAll(".destination button")) element.disabled = true;
   }
 }
+
 async function poll() {
   if (!pending && !settingsSaving) await refresh();
   setTimeout(poll, 1000);

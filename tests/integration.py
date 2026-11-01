@@ -126,12 +126,15 @@ def main():
                     assert inbound_stats["bandwidth_mbps"] > 0, inbound_stats
                     assert inbound_stats["bitrate_mbps"] > 0, inbound_stats
                     assert all(item["state"] == "stopped" for item in controller.status()["outputs"])
-                    for name in relay.DESTINATIONS:
-                        controller.action(name, "start")
-                    wait_for(lambda: all(ready("sink/" + name) for name in relay.DESTINATIONS),
-                             "three outputs")
+                    backup = controller.save_destination("", "youtube", "Backup",
+                                                         f"rtmp://127.0.0.1:{rtmp}/sink", "youtube2")
+                    sinks = list(relay.DESTINATIONS) + ["youtube2"]
+                    for item in controller.status()["outputs"]:
+                        controller.action(item["id"], "start")
+                    wait_for(lambda: all(ready("sink/" + name) for name in sinks),
+                             "four outputs (two YouTube)")
                     wait_for(lambda: all(item["state"] == "forwarding" for item in controller.status()["outputs"]),
-                             "three outputs reporting progress")
+                             "four outputs reporting progress")
                     wait_for(lambda: all(item["stats"]["media_fps"] is not None
                                          for item in controller.status()["outputs"]),
                              "all output telemetry")
@@ -140,7 +143,7 @@ def main():
                         assert 58 <= stats["media_fps"] <= 62, stats
                         assert stats["bandwidth_mbps"] > 0 and stats["bitrate_mbps"] > 0, stats
                         assert stats["total_bytes"] > 0, stats
-                    print("PASS: independently measured inbound and three-output bitrate, bandwidth and 60fps telemetry")
+                    print("PASS: independently measured inbound and four-output bitrate, bandwidth and 60fps telemetry")
                     probe = subprocess.run([
                         ffprobe, "-v", "error", "-rtsp_transport", "tcp",
                         "-read_intervals", "%+1", "-show_streams", "-of", "json",
@@ -152,14 +155,14 @@ def main():
                     assert (video["codec_name"], video["width"], video["height"]) == ("h264", 3840, 2160), video
                     assert video["r_frame_rate"] == "60/1", video
                     assert audio["codec_name"] == "aac", audio
-                    print("PASS: three live outputs; relayed video H.264 3840x2160 60fps, audio AAC")
+                    print("PASS: four live outputs incl. two per platform; relayed video H.264 3840x2160 60fps, audio AAC")
 
                     controller.action("facebook", "stop")
                     assert controller.outputs["facebook"].snapshot()["stats"]["bandwidth_mbps"] == 0
                     wait_for(lambda: not ready("sink/facebook"), "independent stop")
-                    assert ready("sink/youtube") and ready("sink/x")
-                    controller.action("facebook", "configure",
-                                      f"rtmp://127.0.0.1:{rejected_port}/sink/rejected")
+                    assert ready("sink/youtube") and ready("sink/x") and ready("sink/youtube2")
+                    controller.save_destination("facebook", "facebook", "",
+                                                f"rtmp://127.0.0.1:{rejected_port}/sink", "rejected")
                     controller.action("facebook", "start")
                     wait_for(lambda: controller.outputs["facebook"].snapshot()["retries"] > 0,
                              "rejected destination retries")
@@ -180,13 +183,14 @@ def main():
                     wait_for(lambda: controller.status()["inbound"]["state"] == "forwarding"
                              and controller.status()["inbound"]["stats"]["media_fps"] is not None,
                              "inbound telemetry recovery", timeout=45)
-                    controller.action("facebook", "configure",
-                                      f"rtmp://127.0.0.1:{rtmp}/sink/facebook")
+                    controller.save_destination("facebook", "facebook", "",
+                                                f"rtmp://127.0.0.1:{rtmp}/sink", "facebook")
                     controller.action("facebook", "start")
                     wait_for(lambda: ready("sink/facebook"), "destination restart")
                     print("PASS: OBS-style reconnect and individual restart")
-                    for name in relay.DESTINATIONS:
-                        controller.action(name, "stop")
+                    for item in controller.status()["outputs"]:
+                        controller.action(item["id"], "stop")
+                    controller.delete_destination(backup)
                     terminate(source)
                     wait_for(lambda: controller.status()["inbound"]["state"] == "waiting",
                              "OBS stopped before key rotation")

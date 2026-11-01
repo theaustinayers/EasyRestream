@@ -77,7 +77,8 @@ class RelayTests(unittest.TestCase):
             "dashboard_password": self.password,
             "source": "rtsp://127.0.0.1:8554/ingest/testkey",
             "ffmpeg": "ffmpeg",
-            "destinations": dict.fromkeys(relay.DESTINATIONS, ""),
+            "destinations": {"youtube": "rtmp://example.org/live/setup-key",
+                             "facebook": "", "x": ""},
         })
         self.controller = relay.Controller(self.path)
 
@@ -105,18 +106,56 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(args.count("-timeout"), 1)
         self.assertEqual(args.count("-rw_timeout"), 1)
 
-    def test_configuration_persists_without_secrets_in_status(self):
-        url = "rtmps://example.org/live/very-secret-key"
-        self.controller.action("youtube", "configure", url)
-        self.assertEqual(json.loads(self.path.read_text())["destinations"]["youtube"], url)
+    def test_legacy_destinations_migrate(self):
+        stored = json.loads(self.path.read_text())["destinations"]
+        self.assertEqual(stored, [{"platform": "youtube", "name": "YouTube",
+                                   "server": "rtmp://example.org/live",
+                                   "key": "setup-key", "id": "youtube"}])
+
+    def test_multiple_destinations_per_platform_persist_without_secrets_in_status(self):
+        first = self.controller.save_destination("", "youtube", "Backup",
+                                                 "rtmps://example.org/live/", "very-secret-key")
+        second = self.controller.save_destination("", "youtube", "",
+                                                  "rtmp://other.example.org/app", "other-secret")
+        self.controller.save_destination("", "facebook", "Page",
+                                         "rtmps://live-api-s.facebook.com:443/rtmp", "FB-1-0-Ab?s_bl=1")
+        self.assertNotEqual(first, second)
         status = self.controller.status()
-        self.assertNotIn("very-secret-key", json.dumps(status))
-        self.assertTrue(status["outputs"][0]["configured"])
-        self.assertEqual(status["outputs"][0]["state"], "stopped")
+        self.assertEqual([o["platform"] for o in status["outputs"]],
+                         ["youtube", "youtube", "youtube", "facebook"])
+        self.assertNotIn("secret", json.dumps(status))
+        self.assertEqual(status["outputs"][1]["server"], "rtmps://example.org/live")
+        self.assertEqual(status["outputs"][2]["label"], "YouTube")
+        self.assertTrue(all(o["state"] == "stopped" for o in status["outputs"]))
+        restarted = relay.Controller(self.path)
+        saved = {item["id"]: item for item in restarted.destinations()}
+        restarted.close()
+        self.assertEqual(saved[first]["key"], "very-secret-key")
         if os.name != "nt":
             self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
-        self.controller.action("youtube", "configure", "")
-        self.assertFalse(self.controller.status()["outputs"][0]["configured"])
+        self.controller.save_destination(first, "youtube", "Renamed",
+                                         "rtmp://example.org/live", "new-key")
+        self.assertEqual(self.controller.find(first)["name"], "Renamed")
+        self.assertEqual(len(self.controller.destinations()), 4)
+        self.controller.delete_destination(second)
+        self.assertNotIn(second, self.controller.outputs)
+        self.assertEqual(len(json.loads(self.path.read_text())["destinations"]), 3)
+
+    def test_split_url_and_destination_validation(self):
+        self.assertEqual(relay.split_url("rtmp://a.rtmp.youtube.com/live2/abcd-1234"),
+                         ("rtmp://a.rtmp.youtube.com/live2", "abcd-1234"))
+        self.assertEqual(relay.split_url("rtmps://host:443/rtmp/FB-1?s_bl=1"),
+                         ("rtmps://host:443/rtmp", "FB-1?s_bl=1"))
+        for args in (("twitch", "", "rtmp://host/app", "key"),
+                     ("youtube", "", "rtmp://host/app", ""),
+                     ("youtube", "", "rtmp://host/app", "has space"),
+                     ("youtube", "", "rtmp://host/app", "a/b"),
+                     ("youtube", "", "https://host/app", "key"),
+                     ("youtube", "", "rtmp://host/app?x=1", "key"),
+                     ("youtube", "", "rtmp://user:pw@host/app", "key"),
+                     ("youtube", "x" * 65, "rtmp://host/app", "key")):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                relay.validate_destination(*args)
 
     def auth(self, username, password):
         return "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
@@ -242,25 +281,45 @@ class RelayTests(unittest.TestCase):
         with patch.object(relay, "verify_password", side_effect=AssertionError("Cache was not used")):
             self.assertTrue(self.controller.authenticate(header))
 
-    def test_invalid_actions_and_unconfigured_start(self):
-        for args in (("youtube", "start"), ("bad", "stop"),
-                     ("youtube", "pause"), ("youtube", "configure", 0)):
+    def test_invalid_actions(self):
+        for args in (("bad", "stop"), ("youtube", "pause"), ("youtube", "configure")):
             with self.subTest(args=args), self.assertRaises(ValueError):
                 self.controller.action(*args)
+        with self.assertRaises(ValueError):
+            self.controller.delete_destination("missing")
+        with self.assertRaises(ValueError):
+            self.controller.save_destination("missing", "youtube", "", "rtmp://h/app", "k")
+
+    def test_destination_limit(self):
+        for _ in range(relay.MAX_DESTINATIONS - 1):
+            self.controller.save_destination("", "x", "", "rtmps://host/x", "key")
+        with self.assertRaises(ValueError):
+            self.controller.save_destination("", "x", "", "rtmps://host/x", "key")
 
     def test_save_failure_preserves_runtime_configuration(self):
         with patch.object(relay, "save_config", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
-                self.controller.action("youtube", "configure", "rtmp://example.org/live/key")
-        self.assertEqual(self.controller.config["destinations"]["youtube"], "")
+                self.controller.save_destination("", "x", "", "rtmp://example.org/live", "key")
+            with self.assertRaises(OSError):
+                self.controller.delete_destination("youtube")
+        self.assertEqual([item["id"] for item in self.controller.destinations()], ["youtube"])
+        self.assertEqual(list(self.controller.outputs), ["youtube"])
 
-    def test_running_output_cannot_be_reconfigured(self):
+    def test_running_output_cannot_be_edited_or_deleted(self):
         output = self.controller.outputs["youtube"]
         output.thread = unittest.mock.Mock()
         output.thread.is_alive.return_value = True
         with self.assertRaises(ValueError):
-            self.controller.action("youtube", "configure", "rtmp://example.org/live/key")
+            self.controller.save_destination("youtube", "youtube", "", "rtmp://example.org/live", "k")
+        with self.assertRaises(ValueError):
+            self.controller.delete_destination("youtube")
         output.thread = None
+
+    def test_start_uses_combined_server_and_key(self):
+        output = self.controller.outputs["youtube"]
+        with patch.object(output, "start") as start:
+            self.controller.action("youtube", "start")
+        start.assert_called_once_with("rtmp://example.org/live/setup-key")
 
     def test_missing_ffmpeg_reports_error_and_is_stoppable(self):
         output = self.controller.outputs["youtube"]
@@ -324,24 +383,34 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.call("GET", "/../../config.json")[0], 404)
 
     def test_controls_require_json_and_same_origin(self):
-        payload = json.dumps({"name": "youtube", "action": "configure",
-                              "url": "rtmps://host/live/secret"})
+        payload = json.dumps({"platform": "youtube", "name": "Second",
+                              "server": "rtmps://host/live", "key": "secret"})
         headers = {"Content-Type": "application/json", "X-Relay-Control": "1"}
-        self.assertEqual(self.call("POST", "/api/action", payload)[0], 403)
+        self.assertEqual(self.call("POST", "/api/destination", payload)[0], 403)
         bad = dict(headers, Origin="https://evil.example")
-        self.assertEqual(self.call("POST", "/api/action", payload, bad)[0], 403)
-        status, body = self.call("POST", "/api/action", payload, headers)
+        self.assertEqual(self.call("POST", "/api/destination", payload, bad)[0], 403)
+        status, body = self.call("POST", "/api/destination", payload, headers)
         self.assertEqual(status, 200)
         self.assertNotIn(b"secret", body)
+        self.assertEqual(len(json.loads(body)["outputs"]), 2)
+        status, body = self.call("GET", "/api/destinations")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["destinations"][1]["key"], "secret")
+        self.assertEqual(self.call("GET", "/api/destinations", auth=False)[0], 401)
         self.assertEqual(self.call("POST", "/api/action", "{}", headers)[0], 400)
+        self.assertEqual(self.call("POST", "/api/action",
+                                  json.dumps({"id": "youtube", "action": "stop", "url": "x"}),
+                                  headers)[0], 400)
         self.assertEqual(self.call("POST", "/api/action", payload,
                                   dict(headers, **{"Content-Length": "9000"}))[0], 400)
+        delete = json.dumps({"id": "youtube"})
+        self.assertEqual(self.call("POST", "/api/destination/delete", delete, headers)[0], 200)
+        self.assertEqual(len(self.controller.destinations()), 1)
 
     def test_save_error_is_reported(self):
-        payload = json.dumps({"name": "youtube", "action": "configure",
-                              "url": "rtmps://host/live/secret"})
+        payload = json.dumps({"platform": "x", "server": "rtmps://host/live", "key": "secret"})
         with patch.object(relay, "save_config", side_effect=OSError("disk full")):
-            status, body = self.call("POST", "/api/action", payload,
+            status, body = self.call("POST", "/api/destination", payload,
                                     {"Content-Type": "application/json", "X-Relay-Control": "1"})
         self.assertEqual(status, 500)
         self.assertIn(b"Could not save", body)
