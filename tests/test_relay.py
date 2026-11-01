@@ -14,6 +14,60 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import relay
 
 
+class StatsTests(unittest.TestCase):
+    def test_exact_bandwidth_bitrate_and_fps(self):
+        stats = relay.StreamStats()
+        stats.update({"total_size": "1000000", "frame": "60", "out_time_us": "1000000"}, 10)
+        stats.update({"total_size": "3000000", "frame": "180", "out_time_us": "3000000"}, 12)
+        snapshot = stats.snapshot(12, True)
+        self.assertEqual(snapshot["bandwidth_mbps"], 8.0)
+        self.assertEqual(snapshot["bitrate_mbps"], 8.0)
+        self.assertEqual(snapshot["fps"], 60.0)
+        self.assertEqual(snapshot["media_fps"], 60.0)
+        self.assertEqual(snapshot["total_bytes"], 3000000)
+        snapshot = stats.snapshot(18, True)
+        self.assertEqual(snapshot["bandwidth_mbps"], 0)
+        self.assertEqual(snapshot["fps"], 0)
+        self.assertIsNone(snapshot["bitrate_mbps"])
+
+    def test_retry_resets_rate_baseline_not_totals(self):
+        stats = relay.StreamStats()
+        stats.update({"total_size": "1000", "frame": "60", "out_time_us": "1000000"}, 1)
+        stats.new_connection()
+        self.assertIsNone(stats.snapshot(2, True)["bitrate_mbps"])
+        stats.update({"total_size": "500", "frame": "30", "out_time_us": "500000"}, 3)
+        self.assertEqual(stats.total_bytes, 1500)
+        self.assertEqual(stats.snapshot(3, False)["fps"], 0)
+
+    def test_wall_rate_distinct_from_media_rate(self):
+        stats = relay.StreamStats()
+        stats.update({"total_size": "1000", "frame": "60", "out_time_us": "1000000"}, 1)
+        stats.update({"total_size": "2000", "frame": "120", "out_time_us": "2000000"}, 3)
+        snapshot = stats.snapshot(3, True)
+        self.assertEqual(snapshot["fps"], 30)
+        self.assertEqual(snapshot["media_fps"], 60)
+        self.assertEqual(snapshot["bandwidth_mbps"], .004)
+        self.assertEqual(snapshot["bitrate_mbps"], .008)
+
+    def test_invalid_counters_are_explicit_errors(self):
+        stats = relay.StreamStats()
+        for value in ({}, {"total_size": "N/A", "frame": "0", "out_time_us": "0"},
+                      {"total_size": "-1", "frame": "0", "out_time_us": "0"}):
+            with self.assertRaises(ValueError):
+                stats.update(value, 1)
+
+    def test_window_eviction_and_counter_reset(self):
+        stats = relay.StreamStats()
+        for t in range(1, 11):
+            stats.update({"total_size": str(t * 1000), "frame": str(t * 60),
+                          "out_time_us": str(t * 1000000)}, t)
+        self.assertEqual(len(stats.samples), 6)
+        self.assertEqual(stats.snapshot(10, True)["media_fps"], 60)
+        stats.update({"total_size": "100", "frame": "1", "out_time_us": "100"}, 11)
+        self.assertEqual(stats.total_bytes, 10100)
+        self.assertIsNone(stats.snapshot(11, True)["media_fps"])
+
+
 class RelayTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

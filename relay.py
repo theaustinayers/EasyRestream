@@ -56,13 +56,70 @@ def save_config(path: Path, data: dict) -> None:
 
 def ffmpeg_command(binary: str, source: str, destination: str) -> list[str]:
     return [
-        binary, "-nostdin", "-hide_banner", "-loglevel", "warning",
+        binary, "-nostdin", "-y", "-hide_banner", "-loglevel", "warning",
         "-stats_period", "1", "-progress", "pipe:1",
         "-rtsp_transport", "tcp", "-timeout", "10000000", "-i", source,
         "-map", "0:v:0", "-map", "0:a:0", "-c", "copy",
         "-f", "flv", "-flvflags", "no_duration_filesize",
         "-rw_timeout", "10000000", destination,
     ]
+
+
+class StreamStats:
+    def __init__(self):
+        self.total_bytes = 0
+        self.samples = collections.deque()
+        self.last_size = 0
+        self.last_frame = 0
+        self.last_media = 0
+        self.last_data = None
+
+    def new_connection(self):
+        self.samples.clear()
+        self.last_size = self.last_frame = self.last_media = 0
+        self.last_data = None
+
+    def update(self, progress: dict, now: float) -> bool:
+        try:
+            size = int(progress["total_size"])
+            frame = int(progress["frame"])
+            media = int(progress["out_time_us"])
+        except (KeyError, ValueError, TypeError):
+            raise ValueError("FFmpeg did not provide valid byte/frame/timestamp counters.")
+        if min(size, frame, media) < 0:
+            raise ValueError("FFmpeg reported negative progress counters.")
+        if size < self.last_size or frame < self.last_frame or media < self.last_media:
+            self.new_connection()
+        moved = size > self.last_size and frame > self.last_frame
+        self.total_bytes += max(0, size - self.last_size)
+        self.last_size, self.last_frame, self.last_media = size, frame, media
+        if moved:
+            self.last_data = now
+        self.samples.append((now, size, frame, media))
+        while len(self.samples) > 2 and self.samples[1][0] <= now - 5:
+            self.samples.popleft()
+        return moved
+
+    def snapshot(self, now: float, active: bool) -> dict:
+        result = {"bandwidth_mbps": None, "bitrate_mbps": None, "fps": None,
+                  "media_fps": None, "total_bytes": self.total_bytes,
+                  "sample_age_seconds": None if self.last_data is None else round(now - self.last_data, 1)}
+        if not active or self.last_data is None or now - self.last_data > 5:
+            result.update(bandwidth_mbps=0.0, fps=0.0)
+            return result
+        if len(self.samples) < 2:
+            return result
+        first, last = self.samples[0], self.samples[-1]
+        wall = last[0] - first[0]
+        media = (last[3] - first[3]) / 1_000_000
+        size, frames = last[1] - first[1], last[2] - first[2]
+        if wall > 0:
+            result["bandwidth_mbps"] = round(size * 8 / wall / 1_000_000, 3)
+            result["fps"] = round(frames / wall, 1)
+        if media > 0:
+            result["bitrate_mbps"] = round(size * 8 / media / 1_000_000, 3)
+            result["media_fps"] = round(frames / media, 1)
+        return result
 
 
 class Output:
@@ -75,6 +132,7 @@ class Output:
         self.error = ""
         self.retries = 0
         self.last_progress = 0.0
+        self.stats = StreamStats()
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -82,7 +140,8 @@ class Output:
             if state == "forwarding" and time.monotonic() - self.last_progress > 5:
                 state = "stalled"
             return {"name": self.name, "state": state, "error": self.error,
-                    "retries": self.retries}
+                    "retries": self.retries,
+                    "stats": self.stats.snapshot(time.monotonic(), state == "forwarding")}
 
     def start(self, url: str) -> None:
         if self.thread is not None and self.thread.is_alive():
@@ -90,6 +149,7 @@ class Output:
         self.stop_event.clear()
         with self.lock:
             self.state, self.error, self.retries = "connecting", "", 0
+            self.stats = StreamStats()
         self.thread = threading.Thread(target=self.run, args=(url,), name=self.name)
         self.thread.start()
 
@@ -119,6 +179,7 @@ class Output:
         while not self.stop_event.is_set():
             with self.lock:
                 self.state = "connecting"
+                self.stats.new_connection()
             try:
                 process = subprocess.Popen(
                     ffmpeg_command(self.binary, self.source, url),
@@ -135,20 +196,26 @@ class Output:
             made_progress = threading.Event()
 
             def read_progress():
-                previous = -1
+                progress = {}
                 for line in process.stdout:
-                    if line.startswith("out_time_us="):
-                        try:
-                            current = int(line.split("=", 1)[1])
-                        except ValueError:
-                            continue
-                        if current > previous and current > 0:
-                            previous = current
-                            made_progress.set()
-                            with self.lock:
+                    key, separator, value = line.strip().partition("=")
+                    if not separator:
+                        continue
+                    progress[key] = value
+                    if key == "progress":
+                        with self.lock:
+                            try:
+                                moved = self.stats.update(progress, time.monotonic())
+                            except ValueError as exc:
+                                self.error = str(exc)
+                                LOG.warning("%s: %s", self.name, exc)
+                                moved = False
+                            if moved:
+                                made_progress.set()
                                 self.state = "forwarding"
                                 self.last_progress = time.monotonic()
                                 self.error = ""
+                        progress = {}
 
             def read_errors():
                 for line in process.stderr:
@@ -187,7 +254,7 @@ class Output:
 
 
 class Controller:
-    def __init__(self, config_path: Path):
+    def __init__(self, config_path: Path, monitor_enabled: bool = False):
         self.path = config_path
         if os.name != "nt" and config_path.stat().st_mode & 0o077:
             raise ValueError("Configuration must not be accessible to group/others (chmod 600).")
@@ -208,10 +275,17 @@ class Controller:
         self.outputs = {name: Output(name, self.config["source"],
                                     self.config.get("ffmpeg", "ffmpeg"))
                         for name in DESTINATIONS}
+        self.inbound = Output("inbound", self.config["source"],
+                              self.config.get("ffmpeg", "ffmpeg"))
+        if monitor_enabled:
+            self.inbound.start(os.devnull)
 
     def status(self) -> dict:
         with self.lock:
-            return {"outputs": [dict(output.snapshot(),
+            inbound = self.inbound.snapshot()
+            if inbound["state"] in ("connecting", "retrying"):
+                inbound["state"] = "waiting"
+            return {"inbound": inbound, "outputs": [dict(output.snapshot(),
                                      configured=bool(self.config["destinations"][name]))
                                 for name, output in self.outputs.items()]}
 
@@ -245,8 +319,10 @@ class Controller:
             # Signal all children before joining, so shutdown is concurrent.
             for output in self.outputs.values():
                 output.stop_event.set()
+            self.inbound.stop_event.set()
             for output in self.outputs.values():
                 output.stop()
+            self.inbound.stop()
 
 
 def make_handler(controller: Controller):
@@ -343,7 +419,7 @@ def main():
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    controller = Controller(args.config)
+    controller = Controller(args.config, monitor_enabled=True)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(controller))
     server.daemon_threads = True
     def shutdown(signum, frame):

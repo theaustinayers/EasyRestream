@@ -15,8 +15,18 @@
       Verify platform compatibility before going live. Stop disconnects the destination;
       reconnecting may not preserve the broadcast.</aside>
     <p id="error" role="alert"></p>
+    <p id="telemetry">Connecting to telemetry...</p>
+    <section aria-label="Inbound stream">
+      <article id="inbound">
+        <div class="heading"><h2>OBS inbound</h2><span class="state">Loading</span></div>
+        <p class="info">Monitoring the source independently of destination controls.</p>
+        <div class="stats"></div><pre></pre>
+      </article>
+    </section>
     <section id="outputs" aria-label="Destinations"></section>
     <footer>Forwarding means FFmpeg reports output progress, not verified platform broadcast health.
+      Rates are five-second local encoded-payload estimates, excluding network/TLS overhead.
+      Inbound is measured by a local stream-copy monitor, not a NIC counter.
       Source failures trigger retries (up to 30 seconds between attempts). All outputs start stopped after a service restart.</footer>
   </main>
 </body>

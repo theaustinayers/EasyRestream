@@ -4,6 +4,8 @@ One OBS input, three independently controlled RTMP(S) outputs, **no GPU,
 transcoding, resizing, placeholder, recording or preview**. MediaMTX v1.21.3
 handles ingest. One FFmpeg stream-copy process per enabled destination handles
 egress. The dashboard uses Ubuntu's system Python 3 and only the standard library.
+One additional local FFmpeg stream-copy monitor measures inbound health even
+when every destination is stopped; its remuxed output is discarded, not recorded.
 
 ## Compatibility comes first
 
@@ -120,6 +122,57 @@ sudo bash install.sh
   broadcasts. Manually start the desired destinations again.
 
 ## Operations
+
+### Live telemetry
+
+The dashboard refreshes approximately once per second. Inbound and each output
+show five-second rolling measurements:
+
+- **Payload bandwidth (Mbps):** FLV byte-counter change per wall-clock second.
+- **Encoded bitrate (Mbps):** FLV byte-counter change per second of media time.
+  Includes audio and FLV mux overhead; not video-only bitrate.
+- **Delivery FPS:** copied video-frame counter change per wall-clock second.
+  This drops when delivery slows or stalls.
+- **Media FPS:** copied video-frame counter change per second of media time.
+  This describes the stream timing, not how quickly it is delivered.
+- **Payload transferred (decimal GB):** cumulative local mux bytes during the
+  current monitoring/start session, including bytes from reconnect attempts.
+  A manual Start or process restart resets the corresponding counter.
+- **Last data age**, current connection state, retries and redacted errors.
+
+These are **local encoded-payload estimates, not exact NIC/wire bandwidth**:
+RTMP headers, TCP/IP overhead, TLS, retransmissions and remote acknowledgements
+are not measured. Inbound is measured by remuxing a local read of the OBS stream
+to the discard device; it can lag ingest during connection/probing and is not
+an OBS upload socket counter. No decoding or re-encoding is added.
+
+Initial/reconnecting rate values show "Measuring..." until counters exist.
+After a stall or stop, delivery bandwidth/FPS show zero and media rates are
+unavailable rather than stale. A dashboard connection failure explicitly marks
+displayed values as stale. Short startup bursts can temporarily exceed 60
+delivery FPS; smoothing and media FPS help distinguish bursts from stream timing.
+No pixel analysis is done, so a frozen picture with advancing timestamps is
+not detected. Platform playback/ingest acceptance, OBS encoder dropped frames,
+and end-to-end latency still require platform/OBS monitoring.
+
+### Updating an existing installation
+
+To apply source/dashboard changes without replacing saved keys or configuration:
+
+```bash
+cd EasyRestream
+git pull --ff-only
+sudo systemctl stop rtmp-relay
+sudo install -m 644 relay.py /opt/rtmp-relay/relay.py
+sudo install -m 644 web/index.html web/app.js web/style.css /opt/rtmp-relay/web/
+sudo systemctl start rtmp-relay
+```
+
+Refresh the browser and manually restart the desired destinations. The installer
+is for fresh Ubuntu 26.04 systems, not OS upgrades; do not rerun it over an
+existing installation.
+
+### Service diagnostics
 
 ```bash
 sudo systemctl status rtmp-relay-media rtmp-relay

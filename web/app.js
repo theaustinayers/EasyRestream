@@ -3,6 +3,33 @@ const container = document.getElementById("outputs");
 const errorBox = document.getElementById("error");
 const cards = new Map();
 let pending = false;
+const inbound = document.getElementById("inbound");
+const telemetry = document.getElementById("telemetry");
+
+function number(value, suffix, digits = 2) {
+  return value === null || value === undefined ? "Measuring..." : `${value.toFixed(digits)} ${suffix}`;
+}
+
+function drawStats(element, stats) {
+  const values = [
+    ["Payload bandwidth", number(stats.bandwidth_mbps, "Mbps")],
+    ["Encoded bitrate", number(stats.bitrate_mbps, "Mbps")],
+    ["Delivery FPS", number(stats.fps, "fps", 1)],
+    ["Media FPS", number(stats.media_fps, "fps", 1)],
+    ["Payload transferred", number(stats.total_bytes / 1e9, "GB", 3)],
+    ["Last data", stats.sample_age_seconds === null ? "No data yet" : `${stats.sample_age_seconds.toFixed(1)}s ago`]
+  ];
+  element.replaceChildren();
+  for (const [label, value] of values) {
+    const metric = document.createElement("div");
+    const title = document.createElement("span");
+    const detail = document.createElement("strong");
+    title.textContent = label;
+    detail.textContent = value;
+    metric.append(title, detail);
+    element.append(metric);
+  }
+}
 
 async function request(path, body) {
   const response = await fetch(path, body ? {
@@ -16,12 +43,18 @@ async function request(path, body) {
 }
 
 function draw(data) {
+  telemetry.textContent = `Telemetry live | Updated ${new Date().toLocaleTimeString()} | Rates averaged over approximately 5 seconds`;
+  inbound.querySelector(".state").textContent = data.inbound.state;
+  inbound.querySelector(".state").dataset.state = data.inbound.state;
+  inbound.querySelector("pre").textContent = data.inbound.error;
+  drawStats(inbound.querySelector(".stats"), data.inbound.stats);
   for (const output of data.outputs) {
     const card = cards.get(output.name);
     card.state.textContent = output.state;
     card.state.dataset.state = output.state;
     card.info.textContent = `${output.configured ? "Destination saved" : "Not configured"} | Retries: ${output.retries}`;
     card.details.textContent = output.error;
+    drawStats(card.stats, output.stats);
     const active = !["stopped", "error"].includes(output.state);
     card.start.disabled = pending || active || !output.configured;
     card.stop.disabled = pending || !active;
@@ -50,6 +83,7 @@ for (const [name, title] of [["youtube", "YouTube"], ["facebook", "Facebook"], [
   const element = document.createElement("article");
   element.innerHTML = `<div class="heading"><h2></h2><span class="state">Loading</span></div>
     <p class="info"></p>
+    <div class="stats"></div>
     <label>Full destination URL including stream key
       <input type="password" autocomplete="off" spellcheck="false" placeholder="rtmps://host/app/STREAM_KEY">
     </label>
@@ -59,6 +93,7 @@ for (const [name, title] of [["youtube", "YouTube"], ["facebook", "Facebook"], [
   element.querySelector("h2").textContent = title;
   const card = {state: element.querySelector(".state"), info: element.querySelector(".info"),
     input: element.querySelector("input"), details: element.querySelector("pre"),
+    stats: element.querySelector(".stats"),
     save: element.querySelector(".save"), clear: element.querySelector(".clear"),
     start: element.querySelector(".start"), stop: element.querySelector(".stop")};
   card.save.onclick = () => {
@@ -78,11 +113,12 @@ async function refresh() {
     draw(await request("/api/status"));
   } catch (error) {
     errorBox.textContent = `Dashboard unavailable: ${error.message}`;
+    telemetry.textContent = "Telemetry unavailable; displayed values are stale.";
     for (const element of container.querySelectorAll("button")) element.disabled = true;
   }
 }
 async function poll() {
   if (!pending) await refresh();
-  setTimeout(poll, 2000);
+  setTimeout(poll, 1000);
 }
 poll();

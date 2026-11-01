@@ -117,13 +117,29 @@ def main():
 
                     source = publish()
                     wait_for(lambda: ready("ingest/testkey"), "4K60 input")
-                    controller = relay.Controller(folder / "relay.json")
+                    controller = relay.Controller(folder / "relay.json", monitor_enabled=True)
+                    wait_for(lambda: controller.status()["inbound"]["stats"]["media_fps"] is not None,
+                             "inbound telemetry")
+                    inbound_stats = controller.status()["inbound"]["stats"]
+                    assert 58 <= inbound_stats["media_fps"] <= 62, inbound_stats
+                    assert inbound_stats["bandwidth_mbps"] > 0, inbound_stats
+                    assert inbound_stats["bitrate_mbps"] > 0, inbound_stats
+                    assert all(item["state"] == "stopped" for item in controller.status()["outputs"])
                     for name in relay.DESTINATIONS:
                         controller.action(name, "start")
                     wait_for(lambda: all(ready("sink/" + name) for name in relay.DESTINATIONS),
                              "three outputs")
                     wait_for(lambda: all(item["state"] == "forwarding" for item in controller.status()["outputs"]),
                              "three outputs reporting progress")
+                    wait_for(lambda: all(item["stats"]["media_fps"] is not None
+                                         for item in controller.status()["outputs"]),
+                             "all output telemetry")
+                    for item in controller.status()["outputs"]:
+                        stats = item["stats"]
+                        assert 58 <= stats["media_fps"] <= 62, stats
+                        assert stats["bandwidth_mbps"] > 0 and stats["bitrate_mbps"] > 0, stats
+                        assert stats["total_bytes"] > 0, stats
+                    print("PASS: independently measured inbound and three-output bitrate, bandwidth and 60fps telemetry")
                     probe = subprocess.run([
                         ffprobe, "-v", "error", "-rtsp_transport", "tcp",
                         "-read_intervals", "%+1", "-show_streams", "-of", "json",
@@ -138,6 +154,7 @@ def main():
                     print("PASS: three live outputs; relayed video H.264 3840x2160 60fps, audio AAC")
 
                     controller.action("facebook", "stop")
+                    assert controller.outputs["facebook"].snapshot()["stats"]["bandwidth_mbps"] == 0
                     wait_for(lambda: not ready("sink/facebook"), "independent stop")
                     assert ready("sink/youtube") and ready("sink/x")
                     controller.action("facebook", "configure",
@@ -153,9 +170,15 @@ def main():
                     wait_for(lambda: not ready("ingest/testkey"), "source disconnect")
                     wait_for(lambda: controller.outputs["youtube"].snapshot()["retries"] > 0,
                              "source disconnect retry")
+                    wait_for(lambda: controller.status()["inbound"]["state"] == "waiting",
+                             "inbound disconnect health")
+                    assert controller.status()["inbound"]["stats"]["bandwidth_mbps"] == 0
                     publish()
                     wait_for(lambda: ready("sink/youtube") and ready("sink/x"),
                              "source recovery", timeout=45)
+                    wait_for(lambda: controller.status()["inbound"]["state"] == "forwarding"
+                             and controller.status()["inbound"]["stats"]["media_fps"] is not None,
+                             "inbound telemetry recovery", timeout=45)
                     controller.action("facebook", "configure",
                                       f"rtmp://127.0.0.1:{rtmp}/sink/facebook")
                     controller.action("facebook", "start")

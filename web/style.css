@@ -22,3 +22,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #63ddd0; outline-
 pre { white-space: pre-wrap; overflow-wrap: anywhere; color: #ffb7a4; font-size: .8rem; }
 #error { color: #ffb7a4; }
 footer { line-height: 1.6; margin-top: 28px; font-size: .9rem; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 16px; margin: 20px 0; }
+.stats span, .stats strong { display: block; }
+.stats span { color: #a9b8cb; font-size: .8rem; margin-bottom: 6px; }
+.stats strong { font-size: 1.1rem; }
+#telemetry { color: #a9b8cb; font-size: .85rem; }
